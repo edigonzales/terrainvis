@@ -176,12 +176,52 @@ public final class TileProcessor {
             TileTracingContext tracingContext,
             LightingParameters lightingParameters) {
         double total = 0.0;
-        for (int rayIndex = 0; rayIndex < lightingParameters.raysPerPixel(); rayIndex++) {
-            Vector3 direction = raySampler.primaryDirection(tileId, pixelIndex, rayIndex, lightingParameters);
-            total += traceRay(tileId, pixelIndex, rayIndex, originX, originY, originZ, originColumnIndex, direction, bvh, tracingContext, lightingParameters);
+        if (lightingParameters.maxBounces() == 0) {
+            for (int rayIndex = 0; rayIndex < lightingParameters.raysPerPixel(); rayIndex++) {
+                Vector3 direction = raySampler.primaryDirection(tileId, pixelIndex, rayIndex, lightingParameters);
+                total += tracePrimaryRay(
+                        originX,
+                        originY,
+                        originZ,
+                        originColumnIndex,
+                        direction,
+                        bvh,
+                        tracingContext);
+            }
+        } else {
+            for (int rayIndex = 0; rayIndex < lightingParameters.raysPerPixel(); rayIndex++) {
+                Vector3 direction = raySampler.primaryDirection(tileId, pixelIndex, rayIndex, lightingParameters);
+                total += traceRay(tileId, pixelIndex, rayIndex, originX, originY, originZ, originColumnIndex, direction, bvh, tracingContext, lightingParameters);
+            }
         }
         double average = total / lightingParameters.raysPerPixel();
         return average + lightingParameters.ambientPower();
+    }
+
+    private double tracePrimaryRay(
+            double originX,
+            double originY,
+            double originZ,
+            int originColumnIndex,
+            Vector3 direction,
+            CpuBvh bvh,
+            TileTracingContext tracingContext) {
+        double currentOriginX = originX + direction.x() * EPSILON;
+        double currentOriginY = originY + direction.y() * EPSILON;
+        double currentOriginZ = originZ + direction.z() * EPSILON;
+        boolean occluded = bvh.hasAnyHit(
+                currentOriginX,
+                currentOriginY,
+                currentOriginZ,
+                direction.x(),
+                direction.y(),
+                direction.z(),
+                originColumnIndex,
+                tracingContext.traversalContext());
+        if (occluded) {
+            return 0.0;
+        }
+        return LightingModel.visibleContribution(direction, tracingContext.preparedLighting(), 1.0);
     }
 
     private double traceRay(

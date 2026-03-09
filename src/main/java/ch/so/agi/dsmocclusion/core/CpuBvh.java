@@ -127,6 +127,10 @@ public final class CpuBvh {
         return findNearestHit(origin.x(), origin.y(), origin.z(), direction.x(), direction.y(), direction.z(), originColumnIndex, newTraversalContext());
     }
 
+    public boolean hasAnyHit(Vector3 origin, Vector3 direction, int originColumnIndex) {
+        return hasAnyHit(origin.x(), origin.y(), origin.z(), direction.x(), direction.y(), direction.z(), originColumnIndex, newTraversalContext());
+    }
+
     public Hit findNearestHit(
             double originX,
             double originY,
@@ -190,6 +194,63 @@ public final class CpuBvh {
             }
         }
         return closestHit;
+    }
+
+    public boolean hasAnyHit(
+            double originX,
+            double originY,
+            double originZ,
+            double directionX,
+            double directionY,
+            double directionZ,
+            int originColumnIndex,
+            TraversalContext traversalContext) {
+        if (root < 0) {
+            return false;
+        }
+        int[] stack = traversalContext.stack();
+        int size = 0;
+        stack[size++] = root;
+
+        while (size > 0) {
+            int nodeIndex = stack[--size];
+            double nodeDistance = intersectNodeDistance(nodeIndex, originX, originY, originZ, directionX, directionY, directionZ, Double.POSITIVE_INFINITY);
+            if (!Double.isFinite(nodeDistance)) {
+                continue;
+            }
+
+            if (leafNode[nodeIndex]) {
+                if (leafColumn[nodeIndex] != originColumnIndex && nodeDistance > TRACE_EPSILON) {
+                    return true;
+                }
+                continue;
+            }
+
+            int left = leftChild[nodeIndex];
+            int right = rightChild[nodeIndex];
+            double leftDistance = left >= 0
+                    ? intersectNodeDistance(left, originX, originY, originZ, directionX, directionY, directionZ, Double.POSITIVE_INFINITY)
+                    : Double.POSITIVE_INFINITY;
+            double rightDistance = right >= 0
+                    ? intersectNodeDistance(right, originX, originY, originZ, directionX, directionY, directionZ, Double.POSITIVE_INFINITY)
+                    : Double.POSITIVE_INFINITY;
+            if (leftDistance < rightDistance) {
+                if (right >= 0 && Double.isFinite(rightDistance)) {
+                    stack[size++] = right;
+                }
+                if (left >= 0 && Double.isFinite(leftDistance)) {
+                    stack[size++] = left;
+                }
+            } else {
+                if (left >= 0 && Double.isFinite(leftDistance)) {
+                    stack[size++] = left;
+                }
+                if (right >= 0 && Double.isFinite(rightDistance)) {
+                    stack[size++] = right;
+                }
+            }
+        }
+        return false;
     }
 
     public TraversalContext newTraversalContext() {
