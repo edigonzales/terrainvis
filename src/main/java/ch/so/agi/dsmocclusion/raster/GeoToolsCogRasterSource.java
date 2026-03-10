@@ -1,13 +1,13 @@
 package ch.so.agi.dsmocclusion.raster;
 
 import java.awt.Rectangle;
-import java.awt.image.RenderedImage;
 import java.awt.image.Raster;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReadParam;
@@ -42,11 +42,18 @@ import it.geosolutions.imageioimpl.plugins.tiff.TIFFImageReaderSpi;
 import ch.so.agi.dsmocclusion.util.ConsoleLogger;
 
 public final class GeoToolsCogRasterSource implements RasterSource {
+    private static final int REMOTE_READ_ATTEMPTS = 3;
+    private static final RetryDelayStrategy DEFAULT_RETRY_DELAY_STRATEGY = new JitterRetryDelayStrategy();
+    private static final RetrySleeper DEFAULT_RETRY_SLEEPER = Thread::sleep;
+
     private final String inputLocation;
+    private final boolean remote;
     private final Hints hints;
     private final RasterMetadata metadata;
     private final ConsoleLogger logger;
-    private final Queue<ReaderSession> allSessions = new ConcurrentLinkedQueue<>();
+    private final RetryDelayStrategy retryDelayStrategy;
+    private final RetrySleeper retrySleeper;
+    private final Set<ReaderSession> allSessions = ConcurrentHashMap.newKeySet();
     private final ThreadLocal<ReaderSession> sessions;
 
     public GeoToolsCogRasterSource(String inputLocation) throws IOException {
@@ -54,22 +61,29 @@ public final class GeoToolsCogRasterSource implements RasterSource {
     }
 
     public GeoToolsCogRasterSource(String inputLocation, ConsoleLogger logger) throws IOException {
+        this(inputLocation, logger, DEFAULT_RETRY_DELAY_STRATEGY, DEFAULT_RETRY_SLEEPER);
+    }
+
+    GeoToolsCogRasterSource(String inputLocation, ConsoleLogger logger, RetrySleeper retrySleeper) throws IOException {
+        this(inputLocation, logger, DEFAULT_RETRY_DELAY_STRATEGY, retrySleeper);
+    }
+
+    GeoToolsCogRasterSource(
+            String inputLocation,
+            ConsoleLogger logger,
+            RetryDelayStrategy retryDelayStrategy,
+            RetrySleeper retrySleeper) throws IOException {
         this.inputLocation = inputLocation;
         this.logger = logger;
+        this.remote = isRemote(inputLocation);
         this.hints = new Hints(Hints.FORCE_LONGITUDE_FIRST_AXIS_ORDER, Boolean.TRUE);
-        this.logger.verbose("Initializing %s raster source: %s", isRemote(inputLocation) ? "remote" : "local", inputLocation);
+        this.retryDelayStrategy = retryDelayStrategy;
+        this.retrySleeper = retrySleeper;
+        this.logger.verbose("Initializing %s raster source: %s", remote ? "remote" : "local", inputLocation);
         try (ReaderSession session = openSession()) {
             this.metadata = extractMetadata(session.reader());
         }
-        this.sessions = ThreadLocal.withInitial(() -> {
-            try {
-                ReaderSession session = openSession();
-                allSessions.add(session);
-                return session;
-            } catch (IOException e) {
-                throw new IllegalStateException("Failed to open raster reader", e);
-            }
-        });
+        this.sessions = ThreadLocal.withInitial(this::openTrackedSessionUnchecked);
     }
 
     @Override
@@ -79,20 +93,18 @@ public final class GeoToolsCogRasterSource implements RasterSource {
 
     @Override
     public float[] readWindow(PixelWindow window) throws IOException {
-        ReaderSession session = sessions.get();
-        ImageReadParam readParam = session.imageReader().getDefaultReadParam();
-        readParam.setSourceRegion(new Rectangle(window.x(), window.y(), window.width(), window.height()));
-        Raster raster = session.imageReader().read(0, readParam).getRaster();
-        Rectangle bounds = raster.getBounds();
-        return raster.getSamples(bounds.x, bounds.y, bounds.width, bounds.height, 0, (float[]) null);
+        if (!remote) {
+            return readWindowFromSession(sessions.get(), window);
+        }
+        return readRemoteWindowWithRetry(window);
     }
 
     @Override
     public void close() throws IOException {
         IOException failure = null;
-        for (ReaderSession session : allSessions) {
+        for (ReaderSession session : allSessions.toArray(ReaderSession[]::new)) {
             try {
-                session.close();
+                closeTrackedSession(session);
             } catch (IOException e) {
                 if (failure == null) {
                     failure = e;
@@ -105,6 +117,105 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         if (failure != null) {
             throw failure;
         }
+    }
+
+    private float[] readRemoteWindowWithRetry(PixelWindow window) throws IOException {
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= REMOTE_READ_ATTEMPTS; attempt++) {
+            ReaderSession session = null;
+            try {
+                session = sessions.get();
+                return readWindowFromSession(session, window);
+            } catch (IllegalStateException e) {
+                IOException ioFailure = unwrapSessionOpenFailure(e);
+                lastFailure = ioFailure;
+                if (attempt == REMOTE_READ_ATTEMPTS) {
+                    throw ioFailure;
+                }
+                sessions.remove();
+                waitBeforeRetry(window, attempt + 1, ioFailure);
+            } catch (IOException e) {
+                lastFailure = e;
+                if (attempt == REMOTE_READ_ATTEMPTS) {
+                    throw e;
+                }
+                resetCurrentSession(session, e);
+                waitBeforeRetry(window, attempt + 1, e);
+            }
+        }
+        throw lastFailure;
+    }
+
+    private float[] readWindowFromSession(ReaderSession session, PixelWindow window) throws IOException {
+        ImageReadParam readParam = session.imageReader().getDefaultReadParam();
+        readParam.setSourceRegion(new Rectangle(window.x(), window.y(), window.width(), window.height()));
+        Raster raster = session.imageReader().read(0, readParam).getRaster();
+        Rectangle bounds = raster.getBounds();
+        return raster.getSamples(bounds.x, bounds.y, bounds.width, bounds.height, 0, (float[]) null);
+    }
+
+    private ReaderSession openTrackedSessionUnchecked() {
+        try {
+            return openTrackedSession();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to open raster reader", e);
+        }
+    }
+
+    private ReaderSession openTrackedSession() throws IOException {
+        ReaderSession session = openSession();
+        allSessions.add(session);
+        return session;
+    }
+
+    private void resetCurrentSession(ReaderSession session, IOException failure) {
+        sessions.remove();
+        if (session == null) {
+            return;
+        }
+        try {
+            closeTrackedSession(session);
+        } catch (IOException closeFailure) {
+            failure.addSuppressed(closeFailure);
+        }
+    }
+
+    private void closeTrackedSession(ReaderSession session) throws IOException {
+        allSessions.remove(session);
+        session.close();
+    }
+
+    private IOException unwrapSessionOpenFailure(IllegalStateException e) {
+        if (e.getCause() instanceof IOException ioException) {
+            return ioException;
+        }
+        throw e;
+    }
+
+    private void waitBeforeRetry(PixelWindow window, int nextAttempt, IOException failure) throws IOException {
+        long delayMillis = retryDelayStrategy.delayMillisForNextAttempt(nextAttempt);
+        logRetry(window, nextAttempt, delayMillis, failure);
+        try {
+            retrySleeper.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            IOException interrupted = new IOException("Interrupted while waiting to retry remote raster read", e);
+            interrupted.addSuppressed(failure);
+            throw interrupted;
+        }
+    }
+
+    private void logRetry(PixelWindow window, int nextAttempt, long delayMillis, IOException failure) {
+        logger.warn(
+                "Remote raster read failed for window=(%d,%d %dx%d), reopening session and retrying attempt %d/%d after %d ms: %s",
+                window.x(),
+                window.y(),
+                window.width(),
+                window.height(),
+                nextAttempt,
+                REMOTE_READ_ATTEMPTS,
+                delayMillis,
+                failure.getMessage());
     }
 
     private RasterMetadata extractMetadata(GeoTiffReader reader) throws IOException {
@@ -244,6 +355,32 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         ImageReader imageReader = readerSpi.createReaderInstance();
         imageReader.setInput(imageInputStream, true, true);
         return new ReaderSession.ImageReaderHandle(imageReader, imageInputStream);
+    }
+
+    interface RetryDelayStrategy {
+        long delayMillisForNextAttempt(int nextAttempt);
+    }
+
+    @FunctionalInterface
+    interface RetrySleeper {
+        void sleep(long delayMillis) throws InterruptedException;
+    }
+
+    static final class JitterRetryDelayStrategy implements RetryDelayStrategy {
+        private static final double JITTER_RATIO = 0.25d;
+
+        @Override
+        public long delayMillisForNextAttempt(int nextAttempt) {
+            long targetMillis = switch (nextAttempt) {
+                case 2 -> 1_000L;
+                case 3 -> 2_000L;
+                default -> throw new IllegalArgumentException("Unsupported retry attempt: " + nextAttempt);
+            };
+            long jitterMillis = Math.round(targetMillis * JITTER_RATIO);
+            long minDelay = targetMillis - jitterMillis;
+            long maxDelay = targetMillis + jitterMillis;
+            return ThreadLocalRandom.current().nextLong(minDelay, maxDelay + 1);
+        }
     }
 
     private static final class ReaderSession implements AutoCloseable {

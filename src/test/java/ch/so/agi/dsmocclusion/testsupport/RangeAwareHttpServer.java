@@ -6,6 +6,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -19,6 +20,8 @@ public final class RangeAwareHttpServer implements AutoCloseable {
     private final HttpServer server;
     private final AtomicInteger totalRequests = new AtomicInteger();
     private final AtomicInteger rangeRequests = new AtomicInteger();
+    private final AtomicInteger corruptRemaining = new AtomicInteger();
+    private final AtomicInteger corruptedRangeResponses = new AtomicInteger();
     private final List<String> seenRanges = new CopyOnWriteArrayList<>();
 
     public RangeAwareHttpServer(Path file, String route) throws IOException {
@@ -42,6 +45,21 @@ public final class RangeAwareHttpServer implements AutoCloseable {
 
     public List<String> seenRanges() {
         return seenRanges;
+    }
+
+    public void corruptNextRangeResponses(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0");
+        }
+        corruptRemaining.set(count);
+    }
+
+    public void alwaysCorruptRangeResponses() {
+        corruptRemaining.set(Integer.MAX_VALUE);
+    }
+
+    public int corruptedRangeResponses() {
+        return corruptedRangeResponses.get();
     }
 
     @Override
@@ -78,11 +96,16 @@ public final class RangeAwareHttpServer implements AutoCloseable {
                 int start = (int) range[0];
                 int end = (int) range[1];
                 int length = end - start + 1;
+                byte[] responseBody = slice(start, end);
+                if (shouldCorruptRangeResponse()) {
+                    corruptedRangeResponses.incrementAndGet();
+                    responseBody = new byte[length];
+                }
                 headers.add("Content-Range", "bytes " + start + "-" + end + "/" + content.length);
-                headers.add("Content-Length", Integer.toString(length));
-                exchange.sendResponseHeaders(206, length);
+                headers.add("Content-Length", Integer.toString(responseBody.length));
+                exchange.sendResponseHeaders(206, responseBody.length);
                 try (OutputStream output = exchange.getResponseBody()) {
-                    output.write(content, start, length);
+                    output.write(responseBody);
                 }
                 return;
             }
@@ -101,6 +124,23 @@ public final class RangeAwareHttpServer implements AutoCloseable {
             long end = parts[1].isBlank() ? length - 1L : Long.parseLong(parts[1]);
             end = Math.min(end, length - 1L);
             return new long[] {start, end};
+        }
+
+        private byte[] slice(int start, int end) {
+            return Arrays.copyOfRange(content, start, end + 1);
+        }
+
+        private boolean shouldCorruptRangeResponse() {
+            while (true) {
+                int remaining = corruptRemaining.get();
+                if (remaining <= 0) {
+                    return false;
+                }
+                int next = remaining == Integer.MAX_VALUE ? Integer.MAX_VALUE : remaining - 1;
+                if (corruptRemaining.compareAndSet(remaining, next)) {
+                    return true;
+                }
+            }
         }
     }
 }

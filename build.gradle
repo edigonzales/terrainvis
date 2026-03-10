@@ -16,7 +16,7 @@ java {
 
 ext {
     geotoolsVersion = '34.2'
-    imageIoExtVersion = '1.4.16'
+    imageIoExtVersion = '2.0.1'
     picocliVersion = '4.7.7'
 }
 
