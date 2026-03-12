@@ -1,17 +1,21 @@
-# DSM Occlusion (Java CPU)
+# terrainvis (Java CPU)
 
-Java-17-Implementierung eines CPU-basierten DSM-Occlusion-Werkzeugs nach dem Vorbild von `sitn/DSM-Occlusion`.
+Java-17-Implementierung von `terrainvis` für CPU-basierte DSM-Occlusion, RVT-inspirierte Relief-Visualisierungen und generisches Raster-Rendering.
 
 ## Eigenschaften
 
+- Neue Root-CLI mit drei Familien: `occlusion`, `rvt` und `render`.
+- Neue Root-CLI-Familie `render` für Farbverläufe und Layer-Komposition.
 - Liest lokale GeoTIFFs und Remote-COGs per GeoTools/ImageIO-Ext.
 - Verarbeitet nur die angefragte BBOX und liest Rasterdaten etappenweise pro Tile.
 - Nutzt gepufferte Tiles, schneidet nach der Berechnung wieder auf das Kern-Tile zurück und schreibt nur Kern-Tiles mit Daten.
 - Parallele Tile-Verarbeitung über mehrere CPU-Kerne.
-- Deterministische Zufallszahlen mit festem Seed.
-- Tiled-Output ist Standard; Einzel-GeoTIFF ist optional.
-- Strukturierte Laufzeit-Logs mit optionalem `--verbose` für Detailmeldungen.
-- Zwei Algorithmen: exakter CPU-Raytracer (`--algorithm exact`) und horizonbasierte Approximation (`--algorithm horizon`).
+- Single-File- und Tile-Output für `float32` und `uint8`.
+- N-Band-Outputs für RVT-Produkte wie MSTP und Multi-Hillshade.
+- `render compose` färbt Single-Band-Raster ein und kombiniert mehrere Layer als RGB- oder RGBA-GeoTIFF.
+- RVT-Produkte: `slope`, `hillshade`, `multi-hillshade`, `slrm`, `svf`, `asvf`, `positive-openness`, `negative-openness`, `sky-illumination`, `local-dominance`, `msrm`, `mstp`, `vat`.
+- VAT als First-Class-Produkt mit Presets `general`, `flat` und `combined`.
+- Strukturierte Laufzeit-Logs mit optionalem `--verbose`.
 
 ## Voraussetzungen
 
@@ -20,6 +24,7 @@ Java-17-Implementierung eines CPU-basierten DSM-Occlusion-Werkzeugs nach dem Vor
 - Eingaberasters im projizierten CRS mit Meter-Einheiten
 - Nordorientierter GeoTIFF ohne Rotation/Shear
 - Single-Band-DSM
+- Für `render`: exakt ausgerichtete Single-Band-Raster; kein Reproject/Resample
 
 ## Build
 
@@ -30,114 +35,248 @@ Java-17-Implementierung eines CPU-basierten DSM-Occlusion-Werkzeugs nach dem Vor
 
 ## Nutzung
 
-Standardmodus: tiled output in `output_tiles`.
+Hilfe:
+
+```bash
+./gradlew run --args="--help"
+```
+
+Occlusion exact:
 
 ```bash
 ./gradlew run --args="\
-  -i https://example.org/dsm.tif \
+  occlusion exact \
+  --input https://example.org/dsm.tif \
   --bbox 2590000,1210000,2592000,1212000 \
-  -t 512 \
-  --bufferMeters 25 \
+  --output-mode tile-files \
+  --output output_tiles \
+  --tile-size 512 \
+  --buffer-m 25 \
   -r 128 \
   --threads 8"
 ```
 
+Occlusion horizon:
+
 ```bash
-nohup ./gradlew run --args="\
-  -i https://dbeaver.sogeo.services/ch.swisstopo.lidar_2023.dsm.tif \
+./gradlew run --args="\
+  occlusion horizon \
+  --input https://example.org/dsm.tif \
+  --bbox 2590000,1210000,2592000,1212000 \
+  --output-mode single-file \
+  --output horizon.tif \
+  --tile-size 512 \
+  --horizon-directions 32 \
+  --horizon-radius-m 50"
+```
+
+VAT combined:
+
+```bash
+./gradlew run --args="\
+  rvt vat \
+  --input https://example.org/dsm.tif \
+  --bbox 2590000,1210000,2592000,1212000 \
+  --terrain combined \
+  --output-mode single-file \
+  --output vat_combined.tif \
+  --tile-size 512"
+```
+
+## Render compose Beispiele
+
+Schwarz-Weiss-Ramp für ein Occlusion-Raster mit `0 -> schwarz` und `1 -> weiss`:
+
+```bash
+cat > style-bw.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/occlusion.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#000000",
+      "colorTo": "#FFFFFF",
+      "blendMode": "normal",
+      "opacity": 1.0
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-bw.json \
   --bbox 2592000,1213000,2645000,1262000 \
-  -t 2000 \
-  --bufferMeters 100 \
-  -r 1024 \
-  --threads 12 \
-  --algorithm horizon \
-  --horizonDirections 180 \
-  --verbose" &
+  --output-mode single-file \
+  --output occlusion_bw.tif \
+  --tile-size 1024"
 ```
 
-Einzeldatei:
+Grüner Verlauf für ein einzelnes Float-Raster von hellgrün nach dunkelgrün:
+
+```bash
+cat > style-green.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/forest_index.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#CBEA9A",
+      "colorTo": "#1F6B2A",
+      "blendMode": "normal",
+      "opacity": 1.0
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-green.json \
+  --bbox 2592000,1213000,2645000,1262000 \
+  --output-mode single-file \
+  --output forest_green.tif \
+  --tile-size 1024"
+```
+
+Zwei Layer mit `multiply`, um ein farbiges Basisrelief mit einem zweiten Layer zu modulieren:
+
+```bash
+cat > style-multiply.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/base_relief.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#F7E6C4",
+      "colorTo": "#8B6F47",
+      "blendMode": "normal",
+      "opacity": 1.0
+    },
+    {
+      "input": "/path/to/occlusion.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#FFFFFF",
+      "colorTo": "#404040",
+      "blendMode": "multiply",
+      "opacity": 0.7
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-multiply.json \
+  --bbox 2592000,1213000,2645000,1262000 \
+  --output-mode single-file \
+  --output relief_multiply.tif \
+  --tile-size 1024"
+```
+
+Separates Alpha-Raster und `--with-alpha`, damit die Ausgabe als RGBA geschrieben wird:
+
+```bash
+cat > style-rgba.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/thematic_values.tif",
+      "alphaInput": "/path/to/transparency.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#FFF2B2",
+      "colorTo": "#D95F0E",
+      "blendMode": "normal",
+      "opacity": 1.0
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-rgba.json \
+  --bbox 2592000,1213000,2645000,1262000 \
+  --output-mode single-file \
+  --output thematic_rgba.tif \
+  --tile-size 1024 \
+  --with-alpha"
+```
+
+MSTP als RGB-GeoTIFF:
 
 ```bash
 ./gradlew run --args="\
-  -i https://example.org/dsm.tif \
+  rvt mstp \
+  --input https://example.org/dsm.tif \
   --bbox 2590000,1210000,2592000,1212000 \
-  --singleFile \
-  -o result.tif \
-  -t 512 \
-  --bufferMeters 25"
+  --output-mode single-file \
+  --output mstp_rgb.tif \
+  --output-data-type uint8"
 ```
 
-Resume ab Tile 10:
+## CLI-Struktur
 
-```bash
-./gradlew run --args="\
-  -i https://example.org/dsm.tif \
-  --bbox 2590000,1210000,2592000,1212000 \
-  --outputDir output_tiles \
-  --startTile 10"
-```
-
-## Optionen
-
-| Option | Standard | Beschreibung |
-| --- | --- | --- |
-| `-i` | – | Eingabe-URL oder lokaler Pfad |
-| `--bbox` | – | BBOX im Raster-CRS: `minX,minY,maxX,maxY` |
-| `--algorithm` | `exact` | `exact` für Raytracing, `horizon` für schnelle Horizont-Approximation |
-| `-o` | `output.tif` | Ausgabe im `--singleFile`-Modus |
-| `--outputDir` | `output_tiles` | Zielverzeichnis für Tiled-Output |
-| `-r` | `1024` | Rays pro Pixel |
-| `-t` | `2000` | Tile-Grösse in Pixeln |
-| `-b` | – | Buffer in Pixeln |
-| `--bufferMeters` | – | Buffer in Metern |
-| `-e` | `1.0` | Vertikale Überhöhung |
-| `-B` | `0` | Maximale Anzahl Bounces |
-| `--bias` | `1.0` | Bias der Ray-Verteilung |
-| `--ambientPower` | `0` | Additiver Ambient-Anteil pro gültigem Ausgabepixel |
-| `--skyPower` | `1` | Gleichmässige Himmelshelligkeit |
-| `--sunPower` | `0` | Sonnenleistung |
-| `--sunAzimuth` | `0` | Azimut im Uhrzeigersinn ab Norden |
-| `--sunElevation` | `45` | Sonnenhöhe über dem Horizont |
-| `--sunAngularDiam` | `11.4` | Winkeldurchmesser der Sonne |
-| `--horizonDirections` | `32` | Nur für `--algorithm horizon`: Anzahl Azimut-Richtungen |
-| `--horizonRadiusMeters` | – | Nur für `--algorithm horizon`: maximale Horizont-Suchdistanz in Metern |
-| `--singleFile` | `false` | Schreibt ein GeoTIFF für die gesamte angefragte BBOX |
-| `--tiled` | `false` | Kompatibilitätsalias; tiled ist bereits Default |
-| `--startTile` | `0` | Überspringt frühere Tiles |
-| `--outputByte` | `false` | Nur für tiled: clamp `[0,1]` nach Byte `[0,255]` |
-| `--threads` | `availableProcessors()` | Gesamt-Threadbudget; bei `exact` auf Tile-Worker und Tile-Compute aufgeteilt, bei `horizon` Anzahl paralleler Tiles |
-| `--info` | `false` | Druckt Raster-Metadaten vor der Verarbeitung |
-| `--verbose` | `false` | Druckt zusätzliche Detail-Logs für Read/Trace/Write |
+- Gemeinsame Optionen aller Rechenkommandos:
+  - `--bbox`
+  - `--output-mode single-file|tile-files`
+  - `--output`
+  - `--tile-size`
+  - `--threads`
+  - `--start-tile`
+  - `--info`
+  - `--verbose`
+- Occlusion:
+  - `--input`
+  - `--output-data-type float32|uint8`
+  - `--buffer-px` oder `--buffer-m`
+  - `occlusion exact` für Raytracing
+  - `occlusion horizon` für Horizont-Approximation
+- RVT:
+  - `--input`
+  - `--output-data-type float32|uint8`
+  - `--buffer-px` oder `--buffer-m`
+  - `rvt slope|hillshade|multi-hillshade|slrm|svf|asvf|positive-openness|negative-openness|sky-illumination|local-dominance|msrm|mstp|vat`
+- Render:
+  - `render compose --style <style.json> [--with-alpha]`
 
 ## Verhalten und Annahmen
 
-- Wenn weder `-b` noch `--bufferMeters` gesetzt ist, wird der Upstream-Default `tileSize / 3` als Pixelbuffer verwendet.
-- `--outputByte` ist nur im Tiled-Modus erlaubt.
+- Remote-`http(s)` ist auf range-lesbare COG-/GeoTIFF-Quellen ausgelegt.
+- Wenn weder `--buffer-px` noch `--buffer-m` gesetzt ist, bleibt für Occlusion der bisherige Default `tileSize / 3` aktiv; RVT-Produkte ziehen zusätzlich ihren eigenen Mindest-Buffer aus dem Produktbedarf.
 - Tiles ohne Daten im Kernbereich werden nicht berechnet.
-- Wenn nur der Buffer Daten enthält, wird das Tile im Tiled-Modus nicht geschrieben; im Einzeldatei-Modus bleibt der Bereich NoData.
-- `sunElevation` folgt der üblichen Semantik "Grad über dem Horizont".
-- `ambientPower` wird additiv auf das gemittelte Ergebnis pro gültigem Pixel aufgeschlagen.
-- `--algorithm horizon` unterstützt nur `maxBounces=0`; ein explizites `-r` wird in diesem Modus ignoriert.
-- Wenn `--horizonRadiusMeters` gesetzt ist, wird der effektive Tile-Buffer automatisch auf mindestens diese Distanz vergrössert.
-- Im `horizon`-Modus wird `--threads` direkt als Anzahl gleichzeitig berechneter Tiles verwendet; innerhalb eines Tiles bleibt die Berechnung einstufig.
+- `occlusion horizon` unterstützt nur `maxBounces=0`.
+- `vat` defaultet auf `combined`.
+- `uint8` für RVT nutzt produktspezifische Default-Stretches nach RVT-Vorbild; `float32` schreibt rohe Produktwerte.
+- `render compose` arbeitet ohne Buffer, liest nur Kern-Tiles und schreibt immer `uint8` als RGB oder RGBA.
+- `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal` und `multiply`, sowie optional separate Alpha-Raster.
 
 ## Performance-Hinweise
 
-- CPU-only-Läufe mit `-r 1024` und `-t 2000` können sehr langsam sein.
-- Für produktive CPU-Läufe sind meist kleinere Werte sinnvoll, zum Beispiel `-r 64..256` und `-t 256..1024`.
+- CPU-only-Läufe mit grossen Buffern oder vielen Richtungen können langsam sein.
+- Für `occlusion exact` sind meist kleinere Werte sinnvoll, zum Beispiel `-r 64..256` und `--tile-size 256..1024`.
 - Für grosse BBOXen sollte der Tiled-Modus bevorzugt werden.
-- Für schnelle Vorschau- oder Näherungsläufe eignet sich `--algorithm horizon`, insbesondere mit `--horizonDirections 16..32`.
+- Für schnelle Näherungsläufe eignet sich `occlusion horizon`.
+- Für RVT-Produkte mit grossen Nachbarschaften (`svf`, `sky-illumination`, `msrm`, `mstp`) sollte die Tile-Grösse nicht zu klein gewählt werden.
 
 ## Tests
 
 Die Test-Suite deckt ab:
 
+- Root-CLI und neue Subcommand-Hilfe
 - BBOX-Snapping und Tile-Planung
 - Deterministisches Ray-Sampling
 - Lichtmodell und BVH-Hits
 - NoData-/Skip-Logik
 - Remote-Reads per HTTP-Range
 - End-to-End-Läufe im Tiled- und Single-File-Modus
+- RVT-End-to-End-Läufe für VAT, MSTP, Multi-Hillshade und Remote-SVF
+- Render-End-to-End-Läufe für RGB/RGBA, Transparenz-Skip, Start-Tile und Grid-Validierung
 
 ```bash
 ./gradlew test

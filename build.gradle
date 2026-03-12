@@ -33,6 +33,7 @@ repositories {
 
 dependencies {
     implementation "info.picocli:picocli:${picocliVersion}"
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
 
     implementation "org.geotools:gt-main:${geotoolsVersion}"
     implementation "org.geotools:gt-coverage:${geotoolsVersion}"
@@ -52,7 +53,7 @@ dependencies {
 }
 
 application {
-    mainClass = 'ch.so.agi.dsmocclusion.cli.Main'
+    mainClass = 'ch.so.agi.terrainvis.cli.Main'
 }
 
 tasks.withType(JavaCompile).configureEach {

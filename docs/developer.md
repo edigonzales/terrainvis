@@ -1,34 +1,43 @@
 # Developer Notes
 
+Package-Root: `ch.so.agi.terrainvis`
+
 ## Architektur
 
 Das Projekt ist in diese Pakete gegliedert:
 
 - `cli`: Picocli-basierte Kommandozeile
-- `config`: Immutable Laufzeitkonfiguration und Beleuchtungsparameter
+- `config`: gemeinsame Laufzeitkonfiguration sowie Occlusion-spezifische Konfiguration
+- `render`: Style-Parsing, Farbverläufe und Layer-Komposition für generische Single-Band-Raster
 - `raster`: GeoTools/ImageIO-Ext-Zugriff auf lokale GeoTIFFs und Remote-COGs
 - `tiling`: BBOX-Snapping, Buffer-Berechnung und Tile-Planung
 - `core`: CPU-Raytracing, deterministic sampling, BVH und Tile-Verarbeitung
-- `output`: GeoTIFF-Schreiber für tiled output und Einzeldatei-Akkumulator
-- `pipeline`: Orchestrierung der parallelen Tile-Verarbeitung
+- `rvt`: RVT-Produkte, Parameter, Defaults und Rendering-Kerne
+- `output`: GeoTIFF-Schreiber für Single-Band- und N-Band-Outputs
+- `pipeline`: Orchestrierung der parallelen Tile-Verarbeitung für Occlusion und RVT
 - `util`: Konsolenlogger und Heartbeat-Scheduler
 
 ## Ablauf eines Runs
 
-1. `OcclusionCommand` validiert Optionen und baut `RunConfig`.
+1. `MainCommand` dispatcht in die Familien `occlusion`, `rvt` oder `render`.
 2. `GeoToolsCogRasterSource` liest Metadaten des Eingangsraster und validiert:
    - Single-Band
    - Meter-Einheiten
    - Nordorientierung
    - keine Rotation/kein Shear
 3. `TilePlanner` schneidet die BBOX auf den Rasterbereich zu, snappt auf Pixelgrenzen und erzeugt row-major `TileRequest`s.
-4. `OcclusionPipeline` verarbeitet Tiles parallel über ein Fixed-Thread-Pool.
+4. Die passende Pipeline verarbeitet Tiles parallel über ein Fixed-Thread-Pool:
+   - `OcclusionPipeline` für `exact` und `horizon`
+   - `RvtPipeline` für Relief-Visualisierungen
+   - `RenderPipeline` für generische Farbverläufe und Layer-Komposition
 5. Für jedes Tile:
    - gepuffertes Fenster lesen
    - nur den Kernbereich auf Daten prüfen
    - bei Daten:
      - `exact`: BVH aus gepufferten Säulen erzeugen und Kernpixel per Raytracing berechnen
      - `horizon`: lokalen DEM-Pyramidenaufbau erzeugen und Kernpixel per Richtungs-Horizontprofil berechnen
+     - `rvt`: Produkt- bzw. Kompositionskern auf dem gepufferten DEM ausführen
+     - `render`: pro Layer Werte lesen, auf `0..1` stretchen, farblich interpolieren und via `normal`/`multiply` komponieren
    - Ergebnis schreiben
 
 ## Logging
@@ -43,6 +52,7 @@ Das Projekt ist in diese Pakete gegliedert:
 - Remote-Reads verwenden `GeoTiffReader` zusammen mit `CogSourceSPIProvider` und `HttpRangeReader`.
 - Das aktuelle Lesen basiert auf einer lazy Coverage und `RenderedImage.getData(Rectangle)`, damit nur die tatsächlich benötigten Bereiche materialisiert werden.
 - Jeder Worker nutzt eine eigene Reader-Session; GeoTools-Reader werden nicht zwischen Threads geteilt.
+- `render` validiert alle Inputs vorab auf identisches Grid (CRS, Auflösung, Extent, Rastergrösse) und arbeitet ohne Buffer (`buffer=0`).
 
 ## Geometrie und Tracing
 
@@ -58,24 +68,51 @@ Das Projekt ist in diese Pakete gegliedert:
 ## Einzeldatei-Modus
 
 - `SingleFileAccumulator` hält ein temp-dateibasiertes Float-Raster (`DiskBackedFloatImage`).
+- `SingleFileRasterAccumulator` erweitert dieses Prinzip für beliebige Bandzahlen.
 - Jedes berechnete Tile schreibt nur seinen Kernbereich in dieses Raster.
 - Am Ende wird daraus genau ein GeoTIFF geschrieben.
+
+## RVT-Architektur
+
+- `RvtRunConfig` kombiniert `CommonRunConfig`, Produkt-ID und produktspezifische Parameter.
+- `RvtDefaults` kapselt Bandzahl, Byte-Stretching, VAT-Presets und den Mindest-Buffer pro Produkt.
+- `RvtRenderer` berechnet RVT-Produkte tileweise und cached gemeinsame Zwischenprodukte wie:
+  - `SlopeAspect`
+  - SVF-/ASVF-/Openness-Familie
+  - VAT-Zwischenstufen
+- N-Band-Outputs laufen über `RasterBlock`, `RasterTileResult` und die generischen Writer.
+
+## Render-Architektur
+
+- `RenderStyle` beschreibt einen Layer-Stack aus Single-Band-Rastern, Value-Stretch, Farb-Ramp, Blend-Modus und optionalem Alpha-Raster.
+- `RenderPipeline` öffnet pro eindeutigem Input genau eine `GeoToolsCogRasterSource` und teilt sie thread-sicher über die bestehenden threadlokalen Sessions.
+- `RenderComposer` arbeitet rein per Pixel auf dem Kern-Tile:
+  - normalisiert Werte in `0..1`
+  - interpoliert zwischen `colorFrom` und `colorTo`
+  - berechnet Alpha aus `opacity`, optionalem Alpha-Raster und NoData
+  - komponiert in Layer-Reihenfolge als `normal` oder `multiply`
+- `render` schreibt immer `uint8` als RGB oder RGBA; vollständig transparente Tiles gelten als `skipped`.
 
 ## Bekannte Grenzen
 
 - Nur projizierte CRS mit Meter-Einheiten
 - Keine rotierte/sheared Rastergeometrie
 - Keine Multi-Band-Inputs
+- `render` v1 unterstützt nur Single-Band-Inputs und separate Single-Band-Alpha-Raster, keine eingebetteten Alpha- oder RGB/RGBA-Inputs
 - Keine GPU-Implementierung
+- Remote-`http(s)` bleibt auf range-fähige COG-/GeoTIFF-Quellen beschränkt
 - `exact` splittet Threads zwischen parallelen Tiles und paralleler Zeilenberechnung innerhalb eines Tiles auf
 - `horizon` parallelisiert nur über Tiles; die Berechnung innerhalb eines Tiles bleibt einstufig
-- `--algorithm horizon` approximiert nur den No-Bounce-Fall (`maxBounces=0`)
+- `occlusion horizon` approximiert nur den No-Bounce-Fall (`maxBounces=0`)
+- Die RVT-Implementierungen orientieren sich fachlich an `RVT_py`, sind aber nicht auf bitgenaue Reproduktion optimiert
 
 ## Tests
 
 - Unit-Tests prüfen Tiling, Sampling, Beleuchtung, BVH und Skip-Logik.
 - Integrationstests erzeugen ein Test-GeoTIFF, servieren es über einen lokalen HTTP-Range-Server und prüfen Remote-Subset-Reads.
 - End-to-End-Tests decken tiled output, `--startTile` und Einzeldatei-Mosaikierung ab.
+- Zusätzliche End-to-End-Tests decken Root-CLI, VAT, Multi-Hillshade, MSTP und Remote-SVF ab.
+- Zusätzliche Render-Tests decken Style-Validierung, Farb-Ramps, Alpha-/Blend-Logik, Tiled-vs-Single-Mosaik und Remote-Layer ab.
 
 ## Nützliche Befehle
 
