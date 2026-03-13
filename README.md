@@ -85,6 +85,10 @@ VAT combined:
 
 ## Render compose Beispiele
 
+`render compose` unterstützt zwei Ramp-Modi pro Layer:
+- Legacy: `valueMin`/`valueMax` plus `colorFrom`/`colorTo`
+- Mehrere Stops: `stops` mit absoluten Rasterwerten, Farbe und optional `alpha` in `0..1`
+
 Schwarz-Weiss-Ramp für ein Occlusion-Raster mit `0 -> schwarz` und `1 -> weiss`:
 
 ```bash
@@ -139,6 +143,66 @@ EOF
   --output-mode single-file \
   --output forest_green.tif \
   --tile-size 1024"
+```
+
+QML-artiger Verlauf mit mehreren Stops und Alpha pro Stop. QGIS-Alpha `255` wird dabei zu `1.0`, `0` zu `0.0`:
+
+```bash
+cat > style-vegetation-qml.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/vegetation.tif",
+      "stops": [
+        { "value": 0.0, "color": "#FCFCFC", "alpha": 0.0 },
+        { "value": 0.5, "color": "#E5F5E0", "alpha": 1.0 },
+        { "value": 36.0, "color": "#00441B", "alpha": 1.0 }
+      ],
+      "blendMode": "normal",
+      "opacity": 1.0
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-vegetation-qml.json \
+  --bbox 2592000,1213000,2645000,1262000 \
+  --output-mode single-file \
+  --output vegetation_qml_rgba.tif \
+  --tile-size 1024 \
+  --with-alpha"
+```
+
+Gebäude-Ramp aus QGIS ebenfalls als Mehr-Stop-Style:
+
+```bash
+cat > style-buildings-qml.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/path/to/buildings.tif",
+      "stops": [
+        { "value": 0.0, "color": "#FFFFFF", "alpha": 0.0 },
+        { "value": 0.5, "color": "#FEE0D2", "alpha": 1.0 },
+        { "value": 15.0, "color": "#CE6863", "alpha": 1.0 }
+      ],
+      "blendMode": "normal",
+      "opacity": 1.0
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-buildings-qml.json \
+  --bbox 2592000,1213000,2645000,1262000 \
+  --output-mode single-file \
+  --output buildings_qml_rgba.tif \
+  --tile-size 1024 \
+  --with-alpha"
 ```
 
 Zwei Layer mit `multiply`, um ein farbiges Basisrelief mit einem zweiten Layer zu modulieren:
@@ -208,6 +272,58 @@ EOF
   --with-alpha"
 ```
 
+Occlusion als Basis und Vegetation darüber, wobei das feinere Vegetationsraster zur Laufzeit auf das Grid des ersten Layers resampled wird:
+
+```bash
+cat > style-occlusion-vegetation.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/data/ch.swisstopo.lidar_2023.dsm_occlusion.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#000000",
+      "colorTo": "#FFFFFF",
+      "blendMode": "normal",
+      "opacity": 1.0
+    },
+    {
+      "input": "/data/ch.swisstopo.lidar_2023.ndsm_vegetation.tif",
+      "valueMin": 0.0,
+      "valueMax": 30.0,
+      "colorFrom": "#CFE8B4",
+      "colorTo": "#1F5A2A",
+      "blendMode": "normal",
+      "opacity": 0.6
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-occlusion-vegetation.json \
+  --bbox 2610260,1227813,2611914,1228790 \
+  --output-mode tile-files \
+  --output steroids_occlusion_vegetation_rgba \
+  --tile-size 1000 \
+  --with-alpha \
+  --verbose"
+```
+
+Das zweite Raster darf dabei eine andere Auflösung und einen kleineren oder grösseren Extent haben, solange das CRS gleich ist. `render compose` richtet es automatisch zur Laufzeit am Grid des ersten Layers aus.
+
+Optionale Grid-Angleichung für ein feineres Single-Band-Raster, wenn ein materialisierter Zwischenoutput gewünscht ist:
+
+```bash
+./gradlew run --args="\
+  render align-grid \
+  --input /path/to/ndsm_vegetation_025m.tif \
+  --reference /path/to/dsm_occlusion_05m.tif \
+  --output vegetation_aligned_05m.tif \
+  --tile-size 1024"
+```
+
 MSTP als RGB-GeoTIFF:
 
 ```bash
@@ -244,6 +360,7 @@ MSTP als RGB-GeoTIFF:
   - `rvt slope|hillshade|multi-hillshade|slrm|svf|asvf|positive-openness|negative-openness|sky-illumination|local-dominance|msrm|mstp|vat`
 - Render:
   - `render compose --style <style.json> [--with-alpha]`
+  - `render align-grid --input <src.tif> --reference <ref.tif> --output <aligned.tif>`
 
 ## Verhalten und Annahmen
 
@@ -255,6 +372,8 @@ MSTP als RGB-GeoTIFF:
 - `uint8` für RVT nutzt produktspezifische Default-Stretches nach RVT-Vorbild; `float32` schreibt rohe Produktwerte.
 - `render compose` arbeitet ohne Buffer, liest nur Kern-Tiles und schreibt immer `uint8` als RGB oder RGBA.
 - `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal` und `multiply`, sowie optional separate Alpha-Raster.
+- `render compose` akzeptiert Layer mit gleichem CRS auch dann, wenn Auflösung oder Extent abweichen; sie werden zur Laufzeit per GeoTools bilinear auf das Grid des ersten Layers resampled. Bereiche ohne Überlappung liefern NoData bzw. Transparenz.
+- `render align-grid` bleibt als optionales Hilfswerkzeug für materialisierte Vorverarbeitung erhalten.
 
 ## Performance-Hinweise
 

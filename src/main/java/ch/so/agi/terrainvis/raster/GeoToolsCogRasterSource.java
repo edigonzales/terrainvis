@@ -25,12 +25,15 @@ import org.geotools.coverage.grid.GridEnvelope2D;
 import org.geotools.coverage.grid.GridGeometry2D;
 import org.geotools.coverage.grid.io.AbstractGridFormat;
 import org.geotools.coverage.grid.io.OverviewPolicy;
+import org.geotools.coverage.processing.Operations;
 import org.geotools.gce.geotiff.GeoTiffReader;
 import org.geotools.geometry.GeneralBounds;
 import org.geotools.geometry.jts.ReferencedEnvelope;
 import org.geotools.referencing.operation.transform.AffineTransform2D;
 import org.geotools.util.factory.Hints;
+import org.eclipse.imagen.InterpolationBilinear;
 
+import ch.so.agi.terrainvis.config.BBox;
 import ch.so.agi.terrainvis.tiling.PixelWindow;
 import it.geosolutions.imageio.core.BasicAuthURI;
 import it.geosolutions.imageio.plugins.cog.CogImageReadParam;
@@ -99,6 +102,22 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         return readRemoteWindowWithRetry(window);
     }
 
+    public float[] readAlignedWindow(ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+        if (targetEnvelope == null) {
+            throw new IllegalArgumentException("targetEnvelope is required");
+        }
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("width and height must be > 0");
+        }
+        if (!envelopesOverlap(metadata.envelope(), targetEnvelope)) {
+            return createNoDataArray(width * height);
+        }
+        if (!remote) {
+            return readAlignedWindowFromSession(sessions.get(), targetEnvelope, width, height);
+        }
+        return readRemoteAlignedWindowWithRetry(targetEnvelope, width, height);
+    }
+
     @Override
     public void close() throws IOException {
         IOException failure = null;
@@ -146,12 +165,74 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         throw lastFailure;
     }
 
+    private float[] readRemoteAlignedWindowWithRetry(ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= REMOTE_READ_ATTEMPTS; attempt++) {
+            ReaderSession session = null;
+            try {
+                session = sessions.get();
+                return readAlignedWindowFromSession(session, targetEnvelope, width, height);
+            } catch (IllegalStateException e) {
+                IOException ioFailure = unwrapSessionOpenFailure(e);
+                lastFailure = ioFailure;
+                if (attempt == REMOTE_READ_ATTEMPTS) {
+                    throw ioFailure;
+                }
+                sessions.remove();
+                waitBeforeRetry(new PixelWindow(0, 0, width, height), attempt + 1, ioFailure);
+            } catch (IOException e) {
+                lastFailure = e;
+                if (attempt == REMOTE_READ_ATTEMPTS) {
+                    throw e;
+                }
+                resetCurrentSession(session, e);
+                waitBeforeRetry(new PixelWindow(0, 0, width, height), attempt + 1, e);
+            }
+        }
+        throw lastFailure;
+    }
+
     private float[] readWindowFromSession(ReaderSession session, PixelWindow window) throws IOException {
         ImageReadParam readParam = session.imageReader().getDefaultReadParam();
         readParam.setSourceRegion(new Rectangle(window.x(), window.y(), window.width(), window.height()));
         Raster raster = session.imageReader().read(0, readParam).getRaster();
         Rectangle bounds = raster.getBounds();
         return raster.getSamples(bounds.x, bounds.y, bounds.width, bounds.height, 0, (float[]) null);
+    }
+
+    private float[] readAlignedWindowFromSession(ReaderSession session, ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+        ReferencedEnvelope overlap = intersection(metadata.envelope(), targetEnvelope);
+        if (overlap == null) {
+            return createNoDataArray(width * height);
+        }
+        PixelWindow sourceWindow = metadata.snapAndClip(new BBox(
+                overlap.getMinX(),
+                overlap.getMinY(),
+                overlap.getMaxX(),
+                overlap.getMaxY()));
+        GridCoverage2D coverage = session.reader().read(buildReadParameters(sourceWindow));
+        if (coverage == null) {
+            return createNoDataArray(width * height);
+        }
+        try {
+            GridGeometry2D targetGeometry = new GridGeometry2D(new GridEnvelope2D(0, 0, width, height), targetEnvelope);
+            double noData = metadata.noDataValue();
+            GridCoverage2D resampled = (GridCoverage2D) Operations.DEFAULT.resample(
+                    coverage,
+                    metadata.crs(),
+                    targetGeometry,
+                    new InterpolationBilinear(),
+                    new double[] {noData});
+            try {
+                Raster raster = resampled.getRenderedImage().getData();
+                Rectangle bounds = raster.getBounds();
+                return raster.getSamples(bounds.x, bounds.y, bounds.width, bounds.height, 0, (float[]) null);
+            } finally {
+                resampled.dispose(true);
+            }
+        } finally {
+            coverage.dispose(true);
+        }
     }
 
     private ReaderSession openTrackedSessionUnchecked() {
@@ -312,6 +393,32 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         ParameterValue<OverviewPolicy> overviewPolicy = AbstractGridFormat.OVERVIEW_POLICY.createValue();
         overviewPolicy.setValue(OverviewPolicy.IGNORE);
         return new GeneralParameterValue[] {gg, overviewPolicy};
+    }
+
+    private boolean envelopesOverlap(ReferencedEnvelope a, ReferencedEnvelope b) {
+        return a.getMinX() < b.getMaxX()
+                && a.getMaxX() > b.getMinX()
+                && a.getMinY() < b.getMaxY()
+                && a.getMaxY() > b.getMinY();
+    }
+
+    private ReferencedEnvelope intersection(ReferencedEnvelope a, ReferencedEnvelope b) {
+        if (!envelopesOverlap(a, b)) {
+            return null;
+        }
+        return new ReferencedEnvelope(
+                Math.max(a.getMinX(), b.getMinX()),
+                Math.min(a.getMaxX(), b.getMaxX()),
+                Math.max(a.getMinY(), b.getMinY()),
+                Math.min(a.getMaxY(), b.getMaxY()),
+                a.getCoordinateReferenceSystem());
+    }
+
+    private float[] createNoDataArray(int size) {
+        float noData = Double.isNaN(metadata.noDataValue()) ? Float.NaN : (float) metadata.noDataValue();
+        float[] values = new float[size];
+        java.util.Arrays.fill(values, noData);
+        return values;
     }
 
     private ReferencedEnvelope toEnvelope(

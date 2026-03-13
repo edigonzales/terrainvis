@@ -10,6 +10,8 @@ import ch.so.agi.terrainvis.config.OutputConfig;
 import ch.so.agi.terrainvis.config.OutputDataType;
 import ch.so.agi.terrainvis.config.OutputMode;
 import ch.so.agi.terrainvis.config.TilingConfig;
+import ch.so.agi.terrainvis.render.AlignGridRunConfig;
+import ch.so.agi.terrainvis.render.RenderGridAligner;
 import ch.so.agi.terrainvis.render.RenderPipeline;
 import ch.so.agi.terrainvis.render.RenderRunConfig;
 import ch.so.agi.terrainvis.render.RenderStyle;
@@ -23,7 +25,7 @@ import picocli.CommandLine.Model.CommandSpec;
         name = "render",
         description = "terrainvis generic raster rendering and compositing.",
         mixinStandardHelpOptions = true,
-        subcommands = {RenderCommands.ComposeCommand.class})
+        subcommands = {RenderCommands.ComposeCommand.class, RenderCommands.AlignGridCommand.class})
 public final class RenderCommands {
     private RenderCommands() {
     }
@@ -96,6 +98,63 @@ public final class RenderCommands {
                     printInfo,
                     verbose);
             new RenderPipeline(logger, clock).run(runConfig);
+            return 0;
+        }
+    }
+
+    @Command(name = "align-grid", description = "Align a single-band raster to a coarser reference grid using max aggregation.", mixinStandardHelpOptions = true)
+    static final class AlignGridCommand implements Callable<Integer> {
+        @Spec
+        private CommandSpec commandSpec;
+
+        @Option(names = "--input", required = true, description = "Input GeoTIFF path or remote COG URL.")
+        private String inputPath;
+
+        @Option(names = "--reference", required = true, description = "Reference GeoTIFF path or remote COG URL.")
+        private String referencePath;
+
+        @Option(names = "--output", required = true, description = "Output GeoTIFF path.")
+        private Path outputPath;
+
+        @Option(names = "--tile-size", defaultValue = "2000", description = "Tile size in pixels.")
+        private int tileSizePixels;
+
+        @Option(names = "--threads", defaultValue = "0", description = "Number of worker threads. Default: available processors.")
+        private int threads;
+
+        @Option(names = "--info", description = "Print raster metadata before processing.")
+        private boolean printInfo;
+
+        @Option(names = "--verbose", description = "Print additional detailed runtime logs.")
+        private boolean verbose;
+
+        private final Clock clock;
+
+        AlignGridCommand() {
+            this(CliSupport.defaultClock());
+        }
+
+        AlignGridCommand(Clock clock) {
+            this.clock = clock;
+        }
+
+        @Override
+        public Integer call() throws Exception {
+            ConsoleLogger logger = new ConsoleLogger(
+                    new PrintWriter(commandSpec.commandLine().getOut(), true),
+                    new PrintWriter(commandSpec.commandLine().getErr(), true),
+                    clock,
+                    verbose);
+            int resolvedThreads = threads > 0 ? threads : Runtime.getRuntime().availableProcessors();
+            AlignGridRunConfig runConfig = new AlignGridRunConfig(
+                    inputPath,
+                    referencePath,
+                    outputPath,
+                    tileSizePixels,
+                    resolvedThreads,
+                    printInfo,
+                    verbose);
+            new RenderGridAligner(logger).run(runConfig);
             return 0;
         }
     }

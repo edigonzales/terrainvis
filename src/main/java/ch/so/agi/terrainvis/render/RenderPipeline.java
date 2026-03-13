@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import org.geotools.referencing.CRS;
+import org.geotools.geometry.jts.ReferencedEnvelope;
 
 import ch.so.agi.terrainvis.config.CommonRunConfig;
 import ch.so.agi.terrainvis.config.OutputMode;
@@ -116,13 +117,17 @@ public final class RenderPipeline {
 
     private RasterTileResult executeTile(TileRequest tileRequest, List<PreparedLayer> layers, boolean withAlpha) throws IOException {
         PixelWindow window = tileRequest.window().coreWindow();
+        ReferencedEnvelope targetEnvelope = layers.get(0).referenceMetadata().toEnvelope(window);
         Map<GeoToolsCogRasterSource, float[]> valueCache = new IdentityHashMap<>();
         List<RenderComposer.LayerTile> layerTiles = new ArrayList<>(layers.size());
         for (PreparedLayer layer : layers) {
-            float[] values = readCached(valueCache, layer.valueSource(), window);
-            float[] alphaValues = layer.alphaSource() == null ? null : readCached(valueCache, layer.alphaSource(), window);
+            float[] values = readLayerValues(valueCache, layer.valueSource(), layer.valueMetadata(), layer.valueMatchesReferenceGrid(), window, targetEnvelope);
+            float[] alphaValues = layer.alphaSource() == null
+                    ? null
+                    : readLayerValues(valueCache, layer.alphaSource(), layer.alphaMetadata(), layer.alphaMatchesReferenceGrid(), window, targetEnvelope);
             layerTiles.add(new RenderComposer.LayerTile(
                     layer.spec(),
+                    layer.ramp(),
                     values,
                     layer.valueMetadata().noDataValue(),
                     alphaValues,
@@ -131,12 +136,20 @@ public final class RenderPipeline {
         return composer.composeTile(tileRequest, layerTiles, withAlpha);
     }
 
-    private float[] readCached(Map<GeoToolsCogRasterSource, float[]> cache, GeoToolsCogRasterSource source, PixelWindow window) throws IOException {
+    private float[] readLayerValues(
+            Map<GeoToolsCogRasterSource, float[]> cache,
+            GeoToolsCogRasterSource source,
+            RasterMetadata sourceMetadata,
+            boolean matchesReferenceGrid,
+            PixelWindow window,
+            ReferencedEnvelope targetEnvelope) throws IOException {
         float[] cached = cache.get(source);
         if (cached != null) {
             return cached;
         }
-        float[] values = source.readWindow(window);
+        float[] values = matchesReferenceGrid
+                ? source.readWindow(window)
+                : source.readAlignedWindow(targetEnvelope, window.width(), window.height());
         cache.put(source, values);
         return values;
     }
@@ -162,15 +175,26 @@ public final class RenderPipeline {
         for (RenderLayerSpec layer : style.layers()) {
             GeoToolsCogRasterSource valueSource = openedSources.get(layer.input());
             RasterMetadata valueMetadata = valueSource.metadata();
-            validateSameGrid(referenceMetadata, valueMetadata, "Layer input " + layer.input());
+            validateCompatible(referenceMetadata, valueMetadata, "Layer input " + layer.input());
             GeoToolsCogRasterSource alphaSource = null;
             RasterMetadata alphaMetadata = null;
+            boolean alphaMatchesReferenceGrid = false;
             if (layer.alphaInput() != null) {
                 alphaSource = openedSources.get(layer.alphaInput());
                 alphaMetadata = alphaSource.metadata();
-                validateSameGrid(valueMetadata, alphaMetadata, "Alpha input " + layer.alphaInput());
+                validateCompatible(referenceMetadata, alphaMetadata, "Alpha input " + layer.alphaInput());
+                alphaMatchesReferenceGrid = sameGrid(referenceMetadata, alphaMetadata);
             }
-            preparedLayers.add(new PreparedLayer(layer, valueSource, valueMetadata, alphaSource, alphaMetadata));
+            preparedLayers.add(new PreparedLayer(
+                    layer,
+                    RenderRamp.fromSpec(layer),
+                    referenceMetadata,
+                    valueSource,
+                    valueMetadata,
+                    sameGrid(referenceMetadata, valueMetadata),
+                    alphaSource,
+                    alphaMetadata,
+                    alphaMatchesReferenceGrid));
         }
         return new PreparedRender(referenceMetadata, List.copyOf(preparedLayers));
     }
@@ -211,22 +235,21 @@ public final class RenderPipeline {
         }
     }
 
-    private void validateSameGrid(RasterMetadata reference, RasterMetadata candidate, String label) {
+    private void validateCompatible(RasterMetadata reference, RasterMetadata candidate, String label) {
         if (!CRS.equalsIgnoreMetadata(reference.crs(), candidate.crs())) {
             throw new IllegalArgumentException(label + " CRS does not match the reference raster.");
         }
-        if (reference.width() != candidate.width() || reference.height() != candidate.height()) {
-            throw new IllegalArgumentException(label + " dimensions do not match the reference raster.");
-        }
-        if (!same(reference.resolutionX(), candidate.resolutionX()) || !same(reference.resolutionY(), candidate.resolutionY())) {
-            throw new IllegalArgumentException(label + " resolution does not match the reference raster.");
-        }
-        if (!same(reference.envelope().getMinX(), candidate.envelope().getMinX())
-                || !same(reference.envelope().getMinY(), candidate.envelope().getMinY())
-                || !same(reference.envelope().getMaxX(), candidate.envelope().getMaxX())
-                || !same(reference.envelope().getMaxY(), candidate.envelope().getMaxY())) {
-            throw new IllegalArgumentException(label + " extent does not match the reference raster.");
-        }
+    }
+
+    private boolean sameGrid(RasterMetadata reference, RasterMetadata candidate) {
+        return reference.width() == candidate.width()
+                && reference.height() == candidate.height()
+                && same(reference.resolutionX(), candidate.resolutionX())
+                && same(reference.resolutionY(), candidate.resolutionY())
+                && same(reference.envelope().getMinX(), candidate.envelope().getMinX())
+                && same(reference.envelope().getMinY(), candidate.envelope().getMinY())
+                && same(reference.envelope().getMaxX(), candidate.envelope().getMaxX())
+                && same(reference.envelope().getMaxY(), candidate.envelope().getMaxY());
     }
 
     private boolean same(double a, double b) {
@@ -238,10 +261,14 @@ public final class RenderPipeline {
 
     private record PreparedLayer(
             RenderLayerSpec spec,
+            RenderRamp ramp,
+            RasterMetadata referenceMetadata,
             GeoToolsCogRasterSource valueSource,
             RasterMetadata valueMetadata,
+            boolean valueMatchesReferenceGrid,
             GeoToolsCogRasterSource alphaSource,
-            RasterMetadata alphaMetadata) {
+            RasterMetadata alphaMetadata,
+            boolean alphaMatchesReferenceGrid) {
     }
 
     private static final class OpenedSources implements AutoCloseable {

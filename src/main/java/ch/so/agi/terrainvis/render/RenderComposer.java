@@ -17,6 +17,7 @@ public final class RenderComposer {
         float[] blue = new float[pixelCount];
         float[] alpha = withAlpha ? new float[pixelCount] : null;
         int validPixelCount = 0;
+        RenderRamp.Sample sample = new RenderRamp.Sample();
 
         for (int i = 0; i < pixelCount; i++) {
             float dstRed = 0.0f;
@@ -28,11 +29,11 @@ public final class RenderComposer {
                 if (NoData.isNoData(value, layer.valueNoData())) {
                     continue;
                 }
-                float t = normalizedValue(value, layer.spec().valueMin(), layer.spec().valueMax());
-                float srcRed = interpolate(layer.spec().colorFrom().red(), layer.spec().colorTo().red(), t);
-                float srcGreen = interpolate(layer.spec().colorFrom().green(), layer.spec().colorTo().green(), t);
-                float srcBlue = interpolate(layer.spec().colorFrom().blue(), layer.spec().colorTo().blue(), t);
-                float srcAlpha = (float) layer.spec().opacity();
+                layer.ramp().sample(value, sample);
+                float srcRed = sample.red();
+                float srcGreen = sample.green();
+                float srcBlue = sample.blue();
+                float srcAlpha = sample.alpha() * (float) layer.spec().opacity();
                 if (layer.alphaValues() != null) {
                     float alphaValue = layer.alphaValues()[i];
                     if (NoData.isNoData(alphaValue, layer.alphaNoData())) {
@@ -90,26 +91,19 @@ public final class RenderComposer {
 
     public record LayerTile(
             RenderLayerSpec spec,
+            RenderRamp ramp,
             float[] values,
             double valueNoData,
             float[] alphaValues,
             double alphaNoData) {
         public LayerTile {
-            if (spec == null || values == null) {
-                throw new IllegalArgumentException("spec and values are required");
+            if (spec == null || ramp == null || values == null) {
+                throw new IllegalArgumentException("spec, ramp and values are required");
             }
             if (alphaValues != null && alphaValues.length != values.length) {
                 throw new IllegalArgumentException("alphaValues length must match values length");
             }
         }
-    }
-
-    private float normalizedValue(float value, double valueMin, double valueMax) {
-        return clamp01((float) ((value - valueMin) / (valueMax - valueMin)));
-    }
-
-    private float interpolate(int start, int end, float t) {
-        return ((start + ((end - start) * t)) / 255.0f);
     }
 
     private float clamp01(float value) {

@@ -87,11 +87,13 @@ Das Projekt ist in diese Pakete gegliedert:
 - `RenderStyle` beschreibt einen Layer-Stack aus Single-Band-Rastern, Value-Stretch, Farb-Ramp, Blend-Modus und optionalem Alpha-Raster.
 - `RenderPipeline` öffnet pro eindeutigem Input genau eine `GeoToolsCogRasterSource` und teilt sie thread-sicher über die bestehenden threadlokalen Sessions.
 - `RenderComposer` arbeitet rein per Pixel auf dem Kern-Tile:
-  - normalisiert Werte in `0..1`
-  - interpoliert zwischen `colorFrom` und `colorTo`
-  - berechnet Alpha aus `opacity`, optionalem Alpha-Raster und NoData
+  - nutzt pro Layer entweder eine Legacy-Zwei-Punkt-Ramp oder eine vorbereitete Mehr-Stop-Ramp
+  - interpoliert linear zwischen benachbarten Ramp-Stops und klemmt ausserhalb auf den ersten bzw. letzten Stop
+  - berechnet Alpha aus Stop-Alpha bzw. Legacy-Ramp, `opacity`, optionalem Alpha-Raster und NoData
   - komponiert in Layer-Reihenfolge als `normal` oder `multiply`
+- `RenderPipeline` nutzt für gridgleiche Layer weiterhin pixelgenaues Window-Reading; Layer mit gleichem CRS, aber anderer Auflösung oder anderem Extent werden zur Laufzeit über GeoTools auf das Referenz-Tile resampled.
 - `render` schreibt immer `uint8` als RGB oder RGBA; vollständig transparente Tiles gelten als `skipped`.
+- `RenderGridAligner` aggregiert ein feineres Single-Band-Raster per `max` auf das Grid eines gröberen Referenzrasters und schreibt ein `float32`-GeoTIFF.
 
 ## Bekannte Grenzen
 
@@ -99,6 +101,8 @@ Das Projekt ist in diese Pakete gegliedert:
 - Keine rotierte/sheared Rastergeometrie
 - Keine Multi-Band-Inputs
 - `render` v1 unterstützt nur Single-Band-Inputs und separate Single-Band-Alpha-Raster, keine eingebetteten Alpha- oder RGB/RGBA-Inputs
+- `render compose` verlangt für Laufzeit-Alignment gleiches CRS; Auflösung und Extent dürfen abweichen, Output-Grid bleibt aber immer das Grid des ersten Layers
+- `render align-grid` verlangt weiterhin identisches CRS, identischen Extent und einen ganzzahligen Auflösungsfaktor zwischen Input und Referenz
 - Keine GPU-Implementierung
 - Remote-`http(s)` bleibt auf range-fähige COG-/GeoTIFF-Quellen beschränkt
 - `exact` splittet Threads zwischen parallelen Tiles und paralleler Zeilenberechnung innerhalb eines Tiles auf
