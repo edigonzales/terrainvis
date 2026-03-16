@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import ch.so.agi.terrainvis.cli.MainCommand;
+import ch.so.agi.terrainvis.testsupport.CapturedCommandOutput;
 import ch.so.agi.terrainvis.testsupport.RangeAwareHttpServer;
 import ch.so.agi.terrainvis.testsupport.TestRasterFactory;
 import picocli.CommandLine;
@@ -528,6 +529,268 @@ class RenderPipelineEndToEndTest {
     }
 
     @Test
+    void maxResamplingMatchesAlignGridBeforeCompose() throws Exception {
+        float noData = -9999.0f;
+        Path reference = TestRasterFactory.createRaster(
+                tempDir.resolve("max-reference.tif"),
+                new float[] {0.0f, 0.0f, 0.0f, 0.0f},
+                2,
+                2,
+                0.0,
+                0.0,
+                1.0,
+                "EPSG:2056",
+                noData);
+        Path finer = TestRasterFactory.createRaster(
+                tempDir.resolve("max-finer.tif"),
+                new float[] {
+                        noData, 1.0f, 2.0f, 3.0f,
+                        noData, noData, noData, 4.0f,
+                        5.0f, noData, noData, noData,
+                        6.0f, noData, 7.0f, 8.0f
+                },
+                4,
+                4,
+                0.0,
+                0.0,
+                0.5,
+                "EPSG:2056",
+                noData);
+        Path oneShotStyle = writeTwoLayerStyle(
+                tempDir.resolve("max-runtime-style.json"),
+                """
+                {
+                  "input": "%s",
+                  "valueMin": 0.0,
+                  "valueMax": 1.0,
+                  "colorFrom": "#000000",
+                  "colorTo": "#FFFFFF",
+                  "blendMode": "normal",
+                  "opacity": 0.0
+                }
+                """.formatted(escaped(reference.toString())),
+                """
+                {
+                  "input": "%s",
+                  "stops": [
+                    { "value": 0.0, "color": "#000000", "alpha": 1.0 },
+                    { "value": 8.0, "color": "#FFFFFF", "alpha": 1.0 }
+                  ],
+                  "blendMode": "normal",
+                  "opacity": 1.0,
+                  "resampling": "max"
+                }
+                """.formatted(escaped(finer.toString())));
+        Path oneShotOutput = tempDir.resolve("max-runtime-output.tif");
+        Path aligned = tempDir.resolve("max-aligned.tif");
+        Path alignedStyle = writeSingleLayerStopStyle(
+                tempDir.resolve("max-aligned-style.json"),
+                aligned.toString(),
+                null,
+                """
+                { "value": 0.0, "color": "#000000", "alpha": 1.0 },
+                { "value": 8.0, "color": "#FFFFFF", "alpha": 1.0 }
+                """,
+                "normal",
+                1.0);
+        Path alignedOutput = tempDir.resolve("max-aligned-output.tif");
+
+        CommandResult oneShotResult = execute(
+                "render",
+                "compose",
+                "--style",
+                oneShotStyle.toString(),
+                "--bbox",
+                "0,0,2,2",
+                "--output-mode",
+                "single-file",
+                "--output",
+                oneShotOutput.toString(),
+                "--tile-size",
+                "1");
+        CommandResult alignResult = execute(
+                "render",
+                "align-grid",
+                "--input",
+                finer.toString(),
+                "--reference",
+                reference.toString(),
+                "--output",
+                aligned.toString(),
+                "--tile-size",
+                "1");
+        CommandResult alignedComposeResult = execute(
+                "render",
+                "compose",
+                "--style",
+                alignedStyle.toString(),
+                "--bbox",
+                "0,0,2,2",
+                "--output-mode",
+                "single-file",
+                "--output",
+                alignedOutput.toString(),
+                "--tile-size",
+                "1");
+
+        assertThat(oneShotResult.exitCode()).isZero();
+        assertThat(alignResult.exitCode()).isZero();
+        assertThat(alignedComposeResult.exitCode()).isZero();
+        assertThat(TestRasterFactory.readRasterBands(oneShotOutput)).isEqualTo(TestRasterFactory.readRasterBands(alignedOutput));
+    }
+
+    @Test
+    void maxResamplingForSmallerExtentUsesOnlyOverlapArea() throws Exception {
+        Path base = TestRasterFactory.createRaster(
+                tempDir.resolve("base-extent-max.tif"),
+                new float[] {
+                        0.5f, 0.5f, 0.5f, 0.5f,
+                        0.5f, 0.5f, 0.5f, 0.5f,
+                        0.5f, 0.5f, 0.5f, 0.5f,
+                        0.5f, 0.5f, 0.5f, 0.5f
+                },
+                4,
+                4,
+                0.0,
+                0.0,
+                1.0,
+                "EPSG:2056",
+                -9999.0);
+        Path overlay = TestRasterFactory.createRaster(
+                tempDir.resolve("overlay-extent-max.tif"),
+                new float[] {
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f
+                },
+                4,
+                4,
+                0.0,
+                2.0,
+                0.5,
+                "EPSG:2056",
+                -9999.0);
+        Path style = writeTwoLayerStyle(
+                tempDir.resolve("extent-style-max.json"),
+                """
+                {
+                  "input": "%s",
+                  "valueMin": 0.0,
+                  "valueMax": 1.0,
+                  "colorFrom": "#000000",
+                  "colorTo": "#FFFFFF",
+                  "blendMode": "normal",
+                  "opacity": 1.0
+                }
+                """.formatted(escaped(base.toString())),
+                """
+                {
+                  "input": "%s",
+                  "valueMin": 0.0,
+                  "valueMax": 1.0,
+                  "colorFrom": "#00FF00",
+                  "colorTo": "#00FF00",
+                  "blendMode": "normal",
+                  "opacity": 1.0,
+                  "resampling": "max"
+                }
+                """.formatted(escaped(overlay.toString())));
+        Path output = tempDir.resolve("extent-overlay-max.tif");
+
+        int exitCode = new CommandLine(new MainCommand()).execute(
+                "render",
+                "compose",
+                "--style",
+                style.toString(),
+                "--bbox",
+                "0,0,4,4",
+                "--output-mode",
+                "single-file",
+                "--output",
+                output.toString(),
+                "--tile-size",
+                "2");
+
+        assertThat(exitCode).isZero();
+        float[][] bands = TestRasterFactory.readRasterBands(output);
+        assertThat(Arrays.copyOfRange(bands[0], 0, 8)).containsExactly(0.0f, 0.0f, 128.0f, 128.0f, 0.0f, 0.0f, 128.0f, 128.0f);
+        assertThat(Arrays.copyOfRange(bands[1], 0, 8)).containsExactly(255.0f, 255.0f, 128.0f, 128.0f, 255.0f, 255.0f, 128.0f, 128.0f);
+        assertThat(Arrays.copyOfRange(bands[2], 0, 8)).containsExactly(0.0f, 0.0f, 128.0f, 128.0f, 0.0f, 0.0f, 128.0f, 128.0f);
+    }
+
+    @Test
+    void maxResamplingRejectsMisalignedOrigins() throws Exception {
+        Path reference = TestRasterFactory.createRaster(
+                tempDir.resolve("misaligned-reference.tif"),
+                new float[] {0.0f, 0.0f, 0.0f, 0.0f},
+                2,
+                2,
+                0.0,
+                0.0,
+                1.0,
+                "EPSG:2056",
+                -9999.0);
+        Path misaligned = TestRasterFactory.createRaster(
+                tempDir.resolve("misaligned-overlay.tif"),
+                new float[] {
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f
+                },
+                4,
+                4,
+                0.25,
+                0.0,
+                0.5,
+                "EPSG:2056",
+                -9999.0);
+        Path style = writeTwoLayerStyle(
+                tempDir.resolve("misaligned-style.json"),
+                """
+                {
+                  "input": "%s",
+                  "valueMin": 0.0,
+                  "valueMax": 1.0,
+                  "colorFrom": "#000000",
+                  "colorTo": "#FFFFFF",
+                  "blendMode": "normal",
+                  "opacity": 0.0
+                }
+                """.formatted(escaped(reference.toString())),
+                """
+                {
+                  "input": "%s",
+                  "valueMin": 0.0,
+                  "valueMax": 1.0,
+                  "colorFrom": "#00FF00",
+                  "colorTo": "#00FF00",
+                  "blendMode": "normal",
+                  "opacity": 1.0,
+                  "resampling": "max"
+                }
+                """.formatted(escaped(misaligned.toString())));
+
+        CommandResult result = execute(
+                "render",
+                "compose",
+                "--style",
+                style.toString(),
+                "--bbox",
+                "0,0,2,2",
+                "--output-mode",
+                "single-file",
+                "--output",
+                tempDir.resolve("misaligned-output.tif").toString(),
+                "--tile-size",
+                "1");
+
+        assertThat(result.exitCode()).isNotZero();
+        assertThat(result.stderr()).contains("minX is not aligned to the reference raster grid");
+    }
+
+    @Test
     void smallerExtentOverlayUsesOnlyOverlapArea() throws Exception {
         Path base = TestRasterFactory.createRaster(
                 tempDir.resolve("base-extent.tif"),
@@ -816,6 +1079,15 @@ class RenderPipelineEndToEndTest {
         return output;
     }
 
+    private CommandResult execute(String... args) {
+        CapturedCommandOutput output = new CapturedCommandOutput();
+        CommandLine commandLine = new CommandLine(new MainCommand());
+        commandLine.setOut(output.stdoutWriter());
+        commandLine.setErr(output.stderrWriter());
+        int exitCode = commandLine.execute(args);
+        return new CommandResult(exitCode, output.stdout(), output.stderr());
+    }
+
     private float[][] mosaicTiles(Path tiledDir, int width, int height, int tileSize) throws Exception {
         float[][] mosaic = new float[3][width * height];
         for (Path tile : Files.list(tiledDir).toList()) {
@@ -842,5 +1114,8 @@ class RenderPipelineEndToEndTest {
 
     private String escaped(String value) {
         return value.replace("\\", "\\\\");
+    }
+
+    private record CommandResult(int exitCode, String stdout, String stderr) {
     }
 }

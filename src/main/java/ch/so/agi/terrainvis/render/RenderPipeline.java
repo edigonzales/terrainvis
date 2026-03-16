@@ -3,7 +3,7 @@ package ch.so.agi.terrainvis.render;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -118,13 +118,29 @@ public final class RenderPipeline {
     private RasterTileResult executeTile(TileRequest tileRequest, List<PreparedLayer> layers, boolean withAlpha) throws IOException {
         PixelWindow window = tileRequest.window().coreWindow();
         ReferencedEnvelope targetEnvelope = layers.get(0).referenceMetadata().toEnvelope(window);
-        Map<GeoToolsCogRasterSource, float[]> valueCache = new IdentityHashMap<>();
+        Map<LayerReadKey, float[]> valueCache = new HashMap<>();
         List<RenderComposer.LayerTile> layerTiles = new ArrayList<>(layers.size());
         for (PreparedLayer layer : layers) {
-            float[] values = readLayerValues(valueCache, layer.valueSource(), layer.valueMetadata(), layer.valueMatchesReferenceGrid(), window, targetEnvelope);
+            float[] values = readLayerValues(
+                    valueCache,
+                    layer.valueSource(),
+                    layer.valueMetadata(),
+                    layer.valueMatchesReferenceGrid(),
+                    layer.valueAlignment(),
+                    layer.spec().resampling(),
+                    window,
+                    targetEnvelope);
             float[] alphaValues = layer.alphaSource() == null
                     ? null
-                    : readLayerValues(valueCache, layer.alphaSource(), layer.alphaMetadata(), layer.alphaMatchesReferenceGrid(), window, targetEnvelope);
+                    : readLayerValues(
+                            valueCache,
+                            layer.alphaSource(),
+                            layer.alphaMetadata(),
+                            layer.alphaMatchesReferenceGrid(),
+                            layer.alphaAlignment(),
+                            layer.spec().resampling(),
+                            window,
+                            targetEnvelope);
             layerTiles.add(new RenderComposer.LayerTile(
                     layer.spec(),
                     layer.ramp(),
@@ -137,20 +153,35 @@ public final class RenderPipeline {
     }
 
     private float[] readLayerValues(
-            Map<GeoToolsCogRasterSource, float[]> cache,
+            Map<LayerReadKey, float[]> cache,
             GeoToolsCogRasterSource source,
             RasterMetadata sourceMetadata,
             boolean matchesReferenceGrid,
+            GridAlignment alignment,
+            LayerResampling resampling,
             PixelWindow window,
             ReferencedEnvelope targetEnvelope) throws IOException {
-        float[] cached = cache.get(source);
+        LayerReadKey cacheKey = new LayerReadKey(source, resampling, matchesReferenceGrid);
+        float[] cached = cache.get(cacheKey);
         if (cached != null) {
             return cached;
         }
-        float[] values = matchesReferenceGrid
-                ? source.readWindow(window)
-                : source.readAlignedWindow(targetEnvelope, window.width(), window.height());
-        cache.put(source, values);
+        float[] values;
+        if (matchesReferenceGrid) {
+            values = source.readWindow(window);
+        } else if (resampling == LayerResampling.MAX) {
+            if (alignment == null) {
+                throw new IllegalStateException("Missing grid alignment for max-resampled layer.");
+            }
+            PixelWindow inputWindow = alignment.inputWindow(window);
+            float[] inputValues = inputWindow.isEmpty() ? new float[0] : source.readWindow(inputWindow);
+            values = alignment.aggregateMax(window, inputValues, sourceMetadata.noDataValue());
+        } else if (resampling == LayerResampling.NEAREST) {
+            values = source.readAlignedNearestWindow(targetEnvelope, window.width(), window.height());
+        } else {
+            values = source.readAlignedWindow(targetEnvelope, window.width(), window.height());
+        }
+        cache.put(cacheKey, values);
         return values;
     }
 
@@ -176,14 +207,28 @@ public final class RenderPipeline {
             GeoToolsCogRasterSource valueSource = openedSources.get(layer.input());
             RasterMetadata valueMetadata = valueSource.metadata();
             validateCompatible(referenceMetadata, valueMetadata, "Layer input " + layer.input());
+            boolean valueMatchesReferenceGrid = sameGrid(referenceMetadata, valueMetadata);
+            GridAlignment valueAlignment = prepareAlignment(
+                    layer.resampling(),
+                    referenceMetadata,
+                    valueMetadata,
+                    valueMatchesReferenceGrid,
+                    "Layer input " + layer.input());
             GeoToolsCogRasterSource alphaSource = null;
             RasterMetadata alphaMetadata = null;
             boolean alphaMatchesReferenceGrid = false;
+            GridAlignment alphaAlignment = null;
             if (layer.alphaInput() != null) {
                 alphaSource = openedSources.get(layer.alphaInput());
                 alphaMetadata = alphaSource.metadata();
                 validateCompatible(referenceMetadata, alphaMetadata, "Alpha input " + layer.alphaInput());
                 alphaMatchesReferenceGrid = sameGrid(referenceMetadata, alphaMetadata);
+                alphaAlignment = prepareAlignment(
+                        layer.resampling(),
+                        referenceMetadata,
+                        alphaMetadata,
+                        alphaMatchesReferenceGrid,
+                        "Alpha input " + layer.alphaInput());
             }
             preparedLayers.add(new PreparedLayer(
                     layer,
@@ -191,12 +236,26 @@ public final class RenderPipeline {
                     referenceMetadata,
                     valueSource,
                     valueMetadata,
-                    sameGrid(referenceMetadata, valueMetadata),
+                    valueMatchesReferenceGrid,
+                    valueAlignment,
                     alphaSource,
                     alphaMetadata,
-                    alphaMatchesReferenceGrid));
+                    alphaMatchesReferenceGrid,
+                    alphaAlignment));
         }
         return new PreparedRender(referenceMetadata, List.copyOf(preparedLayers));
+    }
+
+    private GridAlignment prepareAlignment(
+            LayerResampling resampling,
+            RasterMetadata referenceMetadata,
+            RasterMetadata candidateMetadata,
+            boolean matchesReferenceGrid,
+            String label) {
+        if (resampling != LayerResampling.MAX || matchesReferenceGrid) {
+            return null;
+        }
+        return GridAlignment.between(candidateMetadata, referenceMetadata, label);
     }
 
     private OpenedSources openSources(RenderStyle style) throws IOException {
@@ -266,9 +325,17 @@ public final class RenderPipeline {
             GeoToolsCogRasterSource valueSource,
             RasterMetadata valueMetadata,
             boolean valueMatchesReferenceGrid,
+            GridAlignment valueAlignment,
             GeoToolsCogRasterSource alphaSource,
             RasterMetadata alphaMetadata,
-            boolean alphaMatchesReferenceGrid) {
+            boolean alphaMatchesReferenceGrid,
+            GridAlignment alphaAlignment) {
+    }
+
+    private record LayerReadKey(
+            GeoToolsCogRasterSource source,
+            LayerResampling resampling,
+            boolean matchesReferenceGrid) {
     }
 
     private static final class OpenedSources implements AutoCloseable {

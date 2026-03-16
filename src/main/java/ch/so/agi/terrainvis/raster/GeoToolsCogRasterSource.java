@@ -31,7 +31,9 @@ import org.geotools.geometry.GeneralBounds;
 import org.geotools.geometry.jts.ReferencedEnvelope;
 import org.geotools.referencing.operation.transform.AffineTransform2D;
 import org.geotools.util.factory.Hints;
+import org.eclipse.imagen.Interpolation;
 import org.eclipse.imagen.InterpolationBilinear;
+import org.eclipse.imagen.InterpolationNearest;
 
 import ch.so.agi.terrainvis.config.BBox;
 import ch.so.agi.terrainvis.tiling.PixelWindow;
@@ -103,6 +105,14 @@ public final class GeoToolsCogRasterSource implements RasterSource {
     }
 
     public float[] readAlignedWindow(ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+        return readAlignedWindow(targetEnvelope, width, height, new InterpolationBilinear());
+    }
+
+    public float[] readAlignedNearestWindow(ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+        return readAlignedWindow(targetEnvelope, width, height, new InterpolationNearest());
+    }
+
+    private float[] readAlignedWindow(ReferencedEnvelope targetEnvelope, int width, int height, Interpolation interpolation) throws IOException {
         if (targetEnvelope == null) {
             throw new IllegalArgumentException("targetEnvelope is required");
         }
@@ -113,9 +123,9 @@ public final class GeoToolsCogRasterSource implements RasterSource {
             return createNoDataArray(width * height);
         }
         if (!remote) {
-            return readAlignedWindowFromSession(sessions.get(), targetEnvelope, width, height);
+            return readAlignedWindowFromSession(sessions.get(), targetEnvelope, width, height, interpolation);
         }
-        return readRemoteAlignedWindowWithRetry(targetEnvelope, width, height);
+        return readRemoteAlignedWindowWithRetry(targetEnvelope, width, height, interpolation);
     }
 
     @Override
@@ -165,13 +175,17 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         throw lastFailure;
     }
 
-    private float[] readRemoteAlignedWindowWithRetry(ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+    private float[] readRemoteAlignedWindowWithRetry(
+            ReferencedEnvelope targetEnvelope,
+            int width,
+            int height,
+            Interpolation interpolation) throws IOException {
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= REMOTE_READ_ATTEMPTS; attempt++) {
             ReaderSession session = null;
             try {
                 session = sessions.get();
-                return readAlignedWindowFromSession(session, targetEnvelope, width, height);
+                return readAlignedWindowFromSession(session, targetEnvelope, width, height, interpolation);
             } catch (IllegalStateException e) {
                 IOException ioFailure = unwrapSessionOpenFailure(e);
                 lastFailure = ioFailure;
@@ -200,7 +214,12 @@ public final class GeoToolsCogRasterSource implements RasterSource {
         return raster.getSamples(bounds.x, bounds.y, bounds.width, bounds.height, 0, (float[]) null);
     }
 
-    private float[] readAlignedWindowFromSession(ReaderSession session, ReferencedEnvelope targetEnvelope, int width, int height) throws IOException {
+    private float[] readAlignedWindowFromSession(
+            ReaderSession session,
+            ReferencedEnvelope targetEnvelope,
+            int width,
+            int height,
+            Interpolation interpolation) throws IOException {
         ReferencedEnvelope overlap = intersection(metadata.envelope(), targetEnvelope);
         if (overlap == null) {
             return createNoDataArray(width * height);
@@ -221,7 +240,7 @@ public final class GeoToolsCogRasterSource implements RasterSource {
                     coverage,
                     metadata.crs(),
                     targetGeometry,
-                    new InterpolationBilinear(),
+                    interpolation,
                     new double[] {noData});
             try {
                 Raster raster = resampled.getRenderedImage().getData();

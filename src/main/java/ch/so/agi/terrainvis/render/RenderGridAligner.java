@@ -8,9 +8,6 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-
-import org.geotools.referencing.CRS;
-
 import ch.so.agi.terrainvis.config.BBox;
 import ch.so.agi.terrainvis.config.CommonRunConfig;
 import ch.so.agi.terrainvis.config.OutputConfig;
@@ -28,11 +25,8 @@ import ch.so.agi.terrainvis.tiling.TilePlan;
 import ch.so.agi.terrainvis.tiling.TilePlanner;
 import ch.so.agi.terrainvis.tiling.TileRequest;
 import ch.so.agi.terrainvis.util.ConsoleLogger;
-import ch.so.agi.terrainvis.util.NoData;
 
 public final class RenderGridAligner {
-    private static final double EPSILON = 1.0e-9;
-
     private final TilePlanner tilePlanner;
     private final ConsoleLogger logger;
 
@@ -125,37 +119,12 @@ public final class RenderGridAligner {
             double noDataValue) throws IOException {
         PixelWindow referenceWindow = tileRequest.window().coreWindow();
         PixelWindow inputWindow = alignment.inputWindow(referenceWindow);
-        float[] inputValues = inputSource.readWindow(inputWindow);
-        float[] outputValues = new float[referenceWindow.width() * referenceWindow.height()];
+        float[] inputValues = inputWindow.isEmpty() ? new float[0] : inputSource.readWindow(inputWindow);
+        float[] outputValues = alignment.aggregateMax(referenceWindow, inputValues, noDataValue);
         int validPixelCount = 0;
-
-        int outputIndex = 0;
-        for (int row = 0; row < referenceWindow.height(); row++) {
-            int inputRowStart = row * alignment.factorY();
-            for (int column = 0; column < referenceWindow.width(); column++) {
-                int inputColumnStart = column * alignment.factorX();
-                float maxValue = 0.0f;
-                boolean hasValue = false;
-                for (int offsetY = 0; offsetY < alignment.factorY(); offsetY++) {
-                    int rowOffset = (inputRowStart + offsetY) * inputWindow.width();
-                    for (int offsetX = 0; offsetX < alignment.factorX(); offsetX++) {
-                        float candidate = inputValues[rowOffset + inputColumnStart + offsetX];
-                        if (NoData.isNoData(candidate, noDataValue)) {
-                            continue;
-                        }
-                        if (!hasValue || candidate > maxValue) {
-                            maxValue = candidate;
-                            hasValue = true;
-                        }
-                    }
-                }
-                if (hasValue) {
-                    outputValues[outputIndex] = maxValue;
-                    validPixelCount++;
-                } else {
-                    outputValues[outputIndex] = (float) noDataValue;
-                }
-                outputIndex++;
+        for (float outputValue : outputValues) {
+            if (!Double.isNaN(noDataValue) ? outputValue != (float) noDataValue : !Float.isNaN(outputValue)) {
+                validPixelCount++;
             }
         }
 
@@ -167,35 +136,9 @@ public final class RenderGridAligner {
     }
 
     private GridAlignment validateAlignment(RasterMetadata inputMetadata, RasterMetadata referenceMetadata) {
-        if (!CRS.equalsIgnoreMetadata(inputMetadata.crs(), referenceMetadata.crs())) {
-            throw new IllegalArgumentException("Input CRS does not match the reference raster.");
-        }
-        if (!same(inputMetadata.envelope().getMinX(), referenceMetadata.envelope().getMinX())
-                || !same(inputMetadata.envelope().getMinY(), referenceMetadata.envelope().getMinY())
-                || !same(inputMetadata.envelope().getMaxX(), referenceMetadata.envelope().getMaxX())
-                || !same(inputMetadata.envelope().getMaxY(), referenceMetadata.envelope().getMaxY())) {
-            throw new IllegalArgumentException("Input extent does not match the reference raster.");
-        }
-        if (inputMetadata.resolutionX() - referenceMetadata.resolutionX() > EPSILON
-                || inputMetadata.resolutionY() - referenceMetadata.resolutionY() > EPSILON) {
-            throw new IllegalArgumentException("Input resolution must be finer than or equal to the reference raster.");
-        }
-
-        int factorX = integerFactor(referenceMetadata.resolutionX() / inputMetadata.resolutionX());
-        int factorY = integerFactor(referenceMetadata.resolutionY() / inputMetadata.resolutionY());
-        if (inputMetadata.width() != referenceMetadata.width() * factorX
-                || inputMetadata.height() != referenceMetadata.height() * factorY) {
-            throw new IllegalArgumentException("Input dimensions are not aligned to the reference raster grid.");
-        }
-        return new GridAlignment(factorX, factorY);
-    }
-
-    private int integerFactor(double factor) {
-        long rounded = Math.round(factor);
-        if (rounded <= 0 || Math.abs(factor - rounded) > EPSILON || rounded > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("Reference-to-input resolution ratio must be an integer in both axes.");
-        }
-        return (int) rounded;
+        GridAlignment alignment = GridAlignment.between(inputMetadata, referenceMetadata, "Input");
+        alignment.requireSameExtent(referenceMetadata, "Input");
+        return alignment;
     }
 
     private BBox fullExtent(RasterMetadata metadata) {
@@ -213,17 +156,4 @@ public final class RenderGridAligner {
         }
     }
 
-    private boolean same(double a, double b) {
-        return Math.abs(a - b) <= EPSILON;
-    }
-
-    private record GridAlignment(int factorX, int factorY) {
-        private PixelWindow inputWindow(PixelWindow referenceWindow) {
-            return new PixelWindow(
-                    referenceWindow.x() * factorX,
-                    referenceWindow.y() * factorY,
-                    referenceWindow.width() * factorX,
-                    referenceWindow.height() * factorY);
-        }
-    }
 }

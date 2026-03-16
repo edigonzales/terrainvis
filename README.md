@@ -89,6 +89,11 @@ VAT combined:
 - Legacy: `valueMin`/`valueMax` plus `colorFrom`/`colorTo`
 - Mehrere Stops: `stops` mit absoluten Rasterwerten, Farbe und optional `alpha` in `0..1`
 
+Optional kann jeder Layer ein `resampling` setzen:
+- `bilinear` (Default) für kontinuierliche Raster
+- `nearest` für nearest-neighbour Laufzeit-Alignment
+- `max` für feinere thematische Raster wie Vegetation oder Buildings; dafür müssen CRS, Grid-Ursprung und das Auflösungsverhältnis zum ersten Layer kompatibel sein
+
 Schwarz-Weiss-Ramp für ein Occlusion-Raster mit `0 -> schwarz` und `1 -> weiss`:
 
 ```bash
@@ -313,6 +318,47 @@ EOF
 
 Das zweite Raster darf dabei eine andere Auflösung und einen kleineren oder grösseren Extent haben, solange das CRS gleich ist. `render compose` richtet es automatisch zur Laufzeit am Grid des ersten Layers aus.
 
+Für feinere thematische Raster wie Vegetation oder Buildings lässt sich das Laufzeit-Alignment auch ohne vorgängigen Zwischenoutput per `max`-Aggregation direkt in `render compose` ausführen:
+
+```bash
+cat > style-occlusion-vegetation-max.json <<'EOF'
+{
+  "layers": [
+    {
+      "input": "/data/ch.swisstopo.lidar_2023.dsm_occlusion.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#000000",
+      "colorTo": "#FFFFFF",
+      "blendMode": "normal",
+      "opacity": 1.0
+    },
+    {
+      "input": "/data/ch.swisstopo.lidar_2023.ndsm_vegetation.tif",
+      "stops": [
+        { "value": 0.0, "color": "#FCFCFC", "alpha": 0.0 },
+        { "value": 0.5, "color": "#E5F5E0", "alpha": 1.0 },
+        { "value": 36.0, "color": "#00441B", "alpha": 1.0 }
+      ],
+      "blendMode": "normal",
+      "opacity": 0.6,
+      "resampling": "max"
+    }
+  ]
+}
+EOF
+
+./gradlew run --args="\
+  render compose \
+  --style style-occlusion-vegetation-max.json \
+  --bbox 2610260,1227813,2611914,1228790 \
+  --output-mode tile-files \
+  --output steroids_occlusion_vegetation_max_rgba \
+  --tile-size 1000 \
+  --with-alpha \
+  --verbose"
+```
+
 Optionale Grid-Angleichung für ein feineres Single-Band-Raster, wenn ein materialisierter Zwischenoutput gewünscht ist:
 
 ```bash
@@ -371,7 +417,7 @@ MSTP als RGB-GeoTIFF:
 - `vat` defaultet auf `combined`.
 - `uint8` für RVT nutzt produktspezifische Default-Stretches nach RVT-Vorbild; `float32` schreibt rohe Produktwerte.
 - `render compose` arbeitet ohne Buffer, liest nur Kern-Tiles und schreibt immer `uint8` als RGB oder RGBA.
-- `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal` und `multiply`, sowie optional separate Alpha-Raster.
+- `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal` und `multiply`, optional separate Alpha-Raster sowie pro Layer `bilinear`, `nearest` und `max` als Resampling-Modi.
 - `render compose` akzeptiert Layer mit gleichem CRS auch dann, wenn Auflösung oder Extent abweichen; sie werden zur Laufzeit per GeoTools bilinear auf das Grid des ersten Layers resampled. Bereiche ohne Überlappung liefern NoData bzw. Transparenz.
 - `render align-grid` bleibt als optionales Hilfswerkzeug für materialisierte Vorverarbeitung erhalten.
 

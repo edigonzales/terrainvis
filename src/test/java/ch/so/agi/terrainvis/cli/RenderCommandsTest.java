@@ -148,6 +148,31 @@ class RenderCommandsTest {
     }
 
     @Test
+    void renderComposeRejectsInvalidResampling() throws Exception {
+        Path style = tempDir.resolve("invalid-resampling.json");
+        Files.writeString(style, """
+                {
+                  "layers": [
+                    {
+                      "input": "missing.tif",
+                      "valueMin": 0.0,
+                      "valueMax": 1.0,
+                      "colorFrom": "#000000",
+                      "colorTo": "#FFFFFF",
+                      "blendMode": "normal",
+                      "opacity": 1.0,
+                      "resampling": "cubic"
+                    }
+                  ]
+                }
+                """);
+
+        CapturedCommandOutput output = execute(style);
+
+        assertThat(output.stderr()).contains("Unsupported resampling");
+    }
+
+    @Test
     void renderComposeRejectsSingleStopRamp() throws Exception {
         Path style = tempDir.resolve("single-stop.json");
         Files.writeString(style, """

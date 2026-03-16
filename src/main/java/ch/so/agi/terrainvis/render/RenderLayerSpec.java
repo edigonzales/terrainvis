@@ -11,6 +11,7 @@ public record RenderLayerSpec(
         RenderColor colorTo,
         BlendMode blendMode,
         double opacity,
+        LayerResampling resampling,
         List<RenderRampStop> stops) {
 
     public RenderLayerSpec(
@@ -22,7 +23,7 @@ public record RenderLayerSpec(
             RenderColor colorTo,
             BlendMode blendMode,
             double opacity) {
-        this(input, alphaInput, valueMin, valueMax, colorFrom, colorTo, blendMode, opacity, null);
+        this(input, alphaInput, valueMin, valueMax, colorFrom, colorTo, blendMode, opacity, LayerResampling.BILINEAR, null);
     }
 
     public RenderLayerSpec(
@@ -31,7 +32,7 @@ public record RenderLayerSpec(
             List<RenderRampStop> stops,
             BlendMode blendMode,
             double opacity) {
-        this(input, alphaInput, null, null, null, null, blendMode, opacity, stops);
+        this(input, alphaInput, null, null, null, null, blendMode, opacity, LayerResampling.BILINEAR, stops);
     }
 
     public RenderLayerSpec {
@@ -93,6 +94,9 @@ public record RenderLayerSpec(
         }
         if (!Double.isFinite(opacity) || opacity < 0.0 || opacity > 1.0) {
             throw new IllegalArgumentException("opacity must be in [0,1]");
+        }
+        if (resampling == null) {
+            resampling = LayerResampling.BILINEAR;
         }
     }
 }

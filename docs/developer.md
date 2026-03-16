@@ -52,7 +52,7 @@ Das Projekt ist in diese Pakete gegliedert:
 - Remote-Reads verwenden `GeoTiffReader` zusammen mit `CogSourceSPIProvider` und `HttpRangeReader`.
 - Das aktuelle Lesen basiert auf einer lazy Coverage und `RenderedImage.getData(Rectangle)`, damit nur die tatsächlich benötigten Bereiche materialisiert werden.
 - Jeder Worker nutzt eine eigene Reader-Session; GeoTools-Reader werden nicht zwischen Threads geteilt.
-- `render` validiert alle Inputs vorab auf identisches Grid (CRS, Auflösung, Extent, Rastergrösse) und arbeitet ohne Buffer (`buffer=0`).
+- `render` validiert alle Inputs vorab auf identisches CRS und arbeitet ohne Buffer (`buffer=0`); gleiche Grids werden direkt gelesen, andere Grids je nach Layer-Resampling zur Laufzeit ausgerichtet.
 
 ## Geometrie und Tracing
 
@@ -84,14 +84,14 @@ Das Projekt ist in diese Pakete gegliedert:
 
 ## Render-Architektur
 
-- `RenderStyle` beschreibt einen Layer-Stack aus Single-Band-Rastern, Value-Stretch, Farb-Ramp, Blend-Modus und optionalem Alpha-Raster.
+- `RenderStyle` beschreibt einen Layer-Stack aus Single-Band-Rastern, Value-Stretch, Farb-Ramp, Blend-Modus, optionalem Alpha-Raster und optionalem Layer-Resampling.
 - `RenderPipeline` öffnet pro eindeutigem Input genau eine `GeoToolsCogRasterSource` und teilt sie thread-sicher über die bestehenden threadlokalen Sessions.
 - `RenderComposer` arbeitet rein per Pixel auf dem Kern-Tile:
   - nutzt pro Layer entweder eine Legacy-Zwei-Punkt-Ramp oder eine vorbereitete Mehr-Stop-Ramp
   - interpoliert linear zwischen benachbarten Ramp-Stops und klemmt ausserhalb auf den ersten bzw. letzten Stop
   - berechnet Alpha aus Stop-Alpha bzw. Legacy-Ramp, `opacity`, optionalem Alpha-Raster und NoData
   - komponiert in Layer-Reihenfolge als `normal` oder `multiply`
-- `RenderPipeline` nutzt für gridgleiche Layer weiterhin pixelgenaues Window-Reading; Layer mit gleichem CRS, aber anderer Auflösung oder anderem Extent werden zur Laufzeit über GeoTools auf das Referenz-Tile resampled.
+- `RenderPipeline` nutzt für gridgleiche Layer weiterhin pixelgenaues Window-Reading; Layer mit gleichem CRS, aber anderer Auflösung oder anderem Extent werden pro Layer entweder bilinear, per nearest neighbour oder per interner `max`-Aggregation auf das Grid des ersten Layers ausgerichtet.
 - `render` schreibt immer `uint8` als RGB oder RGBA; vollständig transparente Tiles gelten als `skipped`.
 - `RenderGridAligner` aggregiert ein feineres Single-Band-Raster per `max` auf das Grid eines gröberen Referenzrasters und schreibt ein `float32`-GeoTIFF.
 
@@ -102,6 +102,7 @@ Das Projekt ist in diese Pakete gegliedert:
 - Keine Multi-Band-Inputs
 - `render` v1 unterstützt nur Single-Band-Inputs und separate Single-Band-Alpha-Raster, keine eingebetteten Alpha- oder RGB/RGBA-Inputs
 - `render compose` verlangt für Laufzeit-Alignment gleiches CRS; Auflösung und Extent dürfen abweichen, Output-Grid bleibt aber immer das Grid des ersten Layers
+- `render compose` verlangt für `resampling=max` zusätzlich einen kompatiblen Grid-Ursprung und einen ganzzahligen Auflösungsfaktor zum ersten Layer
 - `render align-grid` verlangt weiterhin identisches CRS, identischen Extent und einen ganzzahligen Auflösungsfaktor zwischen Input und Referenz
 - Keine GPU-Implementierung
 - Remote-`http(s)` bleibt auf range-fähige COG-/GeoTIFF-Quellen beschränkt
