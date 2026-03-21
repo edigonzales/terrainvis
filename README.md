@@ -417,7 +417,7 @@ MSTP als RGB-GeoTIFF:
 - `vat` defaultet auf `combined`.
 - `uint8` für RVT nutzt produktspezifische Default-Stretches nach RVT-Vorbild; `float32` schreibt rohe Produktwerte.
 - `render compose` arbeitet ohne Buffer, liest nur Kern-Tiles und schreibt immer `uint8` als RGB oder RGBA.
-- `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal` und `multiply`, optional separate Alpha-Raster sowie pro Layer `bilinear`, `nearest` und `max` als Resampling-Modi.
+- `render compose` unterstützt v1 nur lineare 2-Farb-Ramps, `normal`, `multiply`, `screen` und `softlight` (für `screen`/`softlight` wird sRGB-korrigiertes Blending genutzt), optional separate Alpha-Raster sowie pro Layer `bilinear`, `nearest` und `max` als Resampling-Modi.
 - `render compose` akzeptiert Layer mit gleichem CRS auch dann, wenn Auflösung oder Extent abweichen; sie werden zur Laufzeit per GeoTools bilinear auf das Grid des ersten Layers resampled. Bereiche ohne Überlappung liefern NoData bzw. Transparenz.
 - `render align-grid` bleibt als optionales Hilfswerkzeug für materialisierte Vorverarbeitung erhalten.
 

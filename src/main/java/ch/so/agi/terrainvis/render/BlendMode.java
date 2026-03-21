@@ -7,7 +7,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
 
 public enum BlendMode {
     NORMAL("normal"),
-    MULTIPLY("multiply");
+    MULTIPLY("multiply"),
+    SCREEN("screen"),
+    SOFTLIGHT("softlight");
 
     private final String jsonValue;
 
@@ -21,12 +23,15 @@ public enum BlendMode {
             throw new IllegalArgumentException("blendMode is required");
         }
         String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if ("soft-light".equals(normalized)) {
+            normalized = "softlight";
+        }
         for (BlendMode mode : values()) {
             if (mode.jsonValue.equals(normalized)) {
                 return mode;
             }
         }
-        throw new IllegalArgumentException("Unsupported blendMode: " + value + " (expected: normal or multiply)");
+        throw new IllegalArgumentException("Unsupported blendMode: " + value + " (expected: normal, multiply, screen or softlight)");
     }
 
     @JsonValue

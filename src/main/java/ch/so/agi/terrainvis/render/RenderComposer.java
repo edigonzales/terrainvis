@@ -49,10 +49,19 @@ public final class RenderComposer {
                 float blendedRed = srcRed;
                 float blendedGreen = srcGreen;
                 float blendedBlue = srcBlue;
-                if (layer.spec().blendMode() == BlendMode.MULTIPLY) {
+                BlendMode blendMode = layer.spec().blendMode();
+                if (blendMode == BlendMode.MULTIPLY) {
                     blendedRed *= dstRed;
                     blendedGreen *= dstGreen;
                     blendedBlue *= dstBlue;
+                } else if (blendMode == BlendMode.SCREEN) {
+                    blendedRed = blendScreenSrgb(srcRed, dstRed);
+                    blendedGreen = blendScreenSrgb(srcGreen, dstGreen);
+                    blendedBlue = blendScreenSrgb(srcBlue, dstBlue);
+                } else if (blendMode == BlendMode.SOFTLIGHT) {
+                    blendedRed = blendSoftLightSrgb(srcRed, dstRed);
+                    blendedGreen = blendSoftLightSrgb(srcGreen, dstGreen);
+                    blendedBlue = blendSoftLightSrgb(srcBlue, dstBlue);
                 }
 
                 float outAlpha = srcAlpha + (dstAlpha * (1.0f - srcAlpha));
@@ -108,5 +117,43 @@ public final class RenderComposer {
 
     private float clamp01(float value) {
         return Math.max(0.0f, Math.min(1.0f, value));
+    }
+
+    private float blendScreenSrgb(float src, float dst) {
+        float s = srgbToLinear(clamp01(src));
+        float b = srgbToLinear(clamp01(dst));
+        float out = 1.0f - ((1.0f - s) * (1.0f - b));
+        return linearToSrgb(out);
+    }
+
+    private float blendSoftLightSrgb(float src, float dst) {
+        float s = srgbToLinear(clamp01(src));
+        float b = srgbToLinear(clamp01(dst));
+        float out;
+        if (s <= 0.5f) {
+            out = b - ((1.0f - (2.0f * s)) * b * (1.0f - b));
+        } else {
+            float d = b <= 0.25f
+                    ? (((16.0f * b - 12.0f) * b + 4.0f) * b)
+                    : (float) Math.sqrt(b);
+            out = b + ((2.0f * s - 1.0f) * (d - b));
+        }
+        return linearToSrgb(out);
+    }
+
+    private float srgbToLinear(float value) {
+        float c = clamp01(value);
+        if (c <= 0.04045f) {
+            return c / 12.92f;
+        }
+        return (float) Math.pow((c + 0.055f) / 1.055f, 2.4f);
+    }
+
+    private float linearToSrgb(float value) {
+        float c = clamp01(value);
+        if (c <= 0.0031308f) {
+            return 12.92f * c;
+        }
+        return (float) (1.055f * Math.pow(c, 1.0f / 2.4f) - 0.055f);
     }
 }

@@ -135,7 +135,7 @@ class RenderCommandsTest {
                       "valueMax": 1.0,
                       "colorFrom": "#000000",
                       "colorTo": "#FFFFFF",
-                      "blendMode": "screen",
+                      "blendMode": "overlay",
                       "opacity": 1.0
                     }
                   ]

@@ -60,4 +60,28 @@ class RenderStyleTest {
 
         assertThat(style.layers()).singleElement().extracting(RenderLayerSpec::resampling).isEqualTo(LayerResampling.MAX);
     }
+
+    @Test
+    void softLightAliasIsParsedFromStyle() throws Exception {
+        Path stylePath = tempDir.resolve("style-softlight.json");
+        Files.writeString(stylePath, """
+                {
+                  "layers": [
+                    {
+                      "input": "input.tif",
+                      "valueMin": 0.0,
+                      "valueMax": 1.0,
+                      "colorFrom": "#000000",
+                      "colorTo": "#FFFFFF",
+                      "blendMode": "soft-light",
+                      "opacity": 1.0
+                    }
+                  ]
+                }
+                """);
+
+        RenderStyle style = RenderStyle.load(stylePath);
+
+        assertThat(style.layers()).singleElement().extracting(RenderLayerSpec::blendMode).isEqualTo(BlendMode.SOFTLIGHT);
+    }
 }
