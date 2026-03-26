@@ -1,0 +1,25 @@
+{
+  "layers": [
+    {
+      "input": "/Users/stefan/Downloads/ch.swisstopo.lidar_2023.dsm_occlusion.tif",
+      "valueMin": 0.0,
+      "valueMax": 1.0,
+      "colorFrom": "#333333",
+      "colorTo": "#FFFFFF",
+      "blendMode": "normal",
+      "opacity": 1.0
+    },
+    {
+      "input": "/Users/stefan/Downloads/ch.swisstopo.lidar_2023.ndsm_vegetation.tif",
+      "stops": [
+        { "value": 0.0, "color": "#F5FAEE", "alpha": 1 },
+        { "value": 0.8, "color": "#d2e4c2", "alpha": 1 },
+        { "value": 8.0, "color": "#add593", "alpha": 1 },
+        { "value": 30.0, "color": "#6cb86b", "alpha": 1 }
+      ],
+      "blendMode": "multiply",
+      "opacity": 0.8,
+      "resampling": "max"
+    }
+  ]
+}
